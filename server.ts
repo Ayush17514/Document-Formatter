@@ -222,7 +222,7 @@ app.post("/api/latex", async (req, res) => {
     try {
         const { classified, publication } = req.body;
         const genAI = getGenAI();
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         const prompt = `Convert this manuscript structure into a professional LaTeX document compatible with ${publication}. 
         Return ONLY the raw .tex code. Content segments: ${JSON.stringify(classified.map((c: any) => ({ type: c.label, text: c.text })))}`;
         
@@ -258,7 +258,7 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     
     try {
         const genAI = getGenAI();
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         
         const prompt = `Analyze this manuscript text and classify each segment into one of these labels: 
         TITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.
@@ -321,7 +321,7 @@ app.post("/api/process", async (req, res) => {
             const refBlocks = classified.filter((b: any) => b.label === "REFERENCES");
             if (refBlocks.length > 0) {
                 const genAI = getGenAI();
-                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+                const model = genAI.getGenerativeModel({ model: "gemini-pro" });
                 const prompt = `Reformat these academic references strictly into the ${publication} style. 
                 Keep exactly the same number of items. Return ONLY a JSON array of strings.
                 Input: ${JSON.stringify(refBlocks.map((b: any) => b.text))}`;
@@ -351,7 +351,7 @@ app.post("/api/process", async (req, res) => {
       rules = PUBLICATION_RULES[doc_type][publication];
     } else {
       try {
-        const model = getGenAI().getGenerativeModel({ model: "gemini-1.5-flash" });
+        const model = getGenAI().getGenerativeModel({ model: "gemini-pro" });
         const prompt = `Return ONLY JSON for manuscript formatting rules (publication: ${publication}, type: ${doc_type}). 
           Required: font_family, font_size_body, font_size_heading, columns, line_spacing, margins (t,b,l,r), alignment (JUSTIFIED/LEFT).`;
         const result = await model.generateContent(prompt);
