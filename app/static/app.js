@@ -195,20 +195,6 @@
             };
 
             const content = el.querySelector('.block-content');
-            
-            if (block.label === "TABLE") {
-                content.innerHTML = `<div class="bg-indigo-500/5 p-4 rounded-xl border border-indigo-500/10 overflow-x-auto text-xs">${block.html}</div>`;
-            } else if (block.label === "FIGURE") {
-                content.innerHTML = `
-                    <div class="bg-rose-500/5 p-6 rounded-2xl border border-rose-500/10 text-rose-300 italic flex flex-col items-center gap-3">
-                        <i data-lucide="image" class="w-8 h-8 opacity-50"></i>
-                        <span class="text-[10px] font-black uppercase tracking-widest">Structural Figure Asset</span>
-                        <p class="text-[11px] text-slate-500 not-italic">${block.text}</p>
-                    </div>`;
-            } else {
-                content.innerText = block.text;
-            }
-
             content.onblur = () => {
                 if (block.text !== content.innerText) {
                     block.text = content.innerText;
