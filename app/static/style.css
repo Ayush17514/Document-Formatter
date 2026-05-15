@@ -59,6 +59,9 @@
 .label-AUTHORS { border-left: 4px solid #6366f1; }
 .label-ABSTRACT { border-left: 4px solid #10b981; }
 .label-BODY { border-left: 4px solid #64748b; }
+.label-EQUATION { border-left: 4px solid #06b6d4; }
+.label-TABLE { border-left: 4px solid #10b981; }
+.label-FIGURE { border-left: 4px solid #f43f5e; }
 .label-REFERENCES { border-left: 4px solid #ec4899; }
 
 .sticky-sidebar {

@@ -7,9 +7,15 @@ import mammoth from "mammoth";
 import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, convertInchesToTwip } from "docx";
+import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, convertInchesToTwip, Table, TableRow, TableCell, ImageRun, BorderStyle, WidthType } from "docx";
+import { parse } from 'node-html-parser';
 
-dotenv.config();
+dotenv.config(); // Standard load
+// Fallback manual load if needed
+if (!process.env.GEMINI_API_KEY) {
+    dotenv.config({ path: path.join(process.cwd(), ".env") });
+}
+console.log("Gemini Key Status:", process.env.GEMINI_API_KEY ? "Present" : "Missing");
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -244,32 +250,83 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     const file = req.file;
     if (!file) throw new Error("No file uploaded");
     
-    // Parse using mammoth to obtain raw text for structural analysis
-    const textResult = await mammoth.extractRawText({ path: file.path });
-    const text = textResult.value;
+    // Custom image handler to capture images
+    const images: any[] = [];
+    const options = {
+        convertImage: mammoth.images.imgElement(function(image) {
+            return image.read().then(function(imageBuffer) {
+                const id = `img_${Date.now()}_${images.length}`;
+                const imgPath = path.join(UPLOAD_DIR, `${id}.png`);
+                fs.writeFileSync(imgPath, imageBuffer);
+                images.push({ id, path: imgPath, contentType: image.contentType });
+                return {
+                    src: `[[ID:${id}]]` // Special marker for reconstruction
+                };
+            });
+        })
+    };
+
+    const htmlResult = await mammoth.convertToHtml({ path: file.path }, options);
+    const html = htmlResult.value;
     
-    // Improved Structure Classification
-    const paragraphs = text.split("\n").filter(t => t.trim() !== "");
-    const classified = paragraphs.map((t, i) => {
-      let label = "BODY";
-      const tLower = t.toLowerCase().trim();
-      const tClean = t.trim();
-      
-      if (i === 0 && tClean.length < 200) label = "TITLE";
-      else if (i < 5 && (tClean.includes("@") || tClean.includes(","))) label = "AUTHORS";
-      else if (tLower.startsWith("abstract") || (i < 10 && tLower.startsWith("abstract:"))) label = "ABSTRACT";
-      else if (tLower.startsWith("reference") || tLower.startsWith("bibliography") || (tClean.match(/^\[\d+\]/) && i > paragraphs.length - 20)) label = "REFERENCES";
-      else if (tClean.length < 100 && (tClean.match(/^[I|V|X|\d]+\./) || tClean === tClean.toUpperCase())) label = "HEADING1";
-      else if (tClean.length < 120 && (tClean.match(/^[A-Z]\./) || tClean.match(/^\d+\.\d+/))) label = "HEADING2";
-      
-      return { text: tClean, label, confidence: 0.9 };
-    });
+    // Parse HTML to get high-level blocks (p, table, etc)
+    const root = parse(html);
+    const blocks = root.childNodes
+        .filter(node => node.nodeType === 1)
+        .map(node => {
+            const el = node as any;
+            return {
+                tag: el.tagName,
+                html: el.outerHTML,
+                text: el.text.trim()
+            };
+        })
+        .filter(b => b.text.length > 0 || b.tag === 'TABLE' || b.html.includes('[[ID:img_'));
+
+    let classified = [];
+    
+    try {
+        const genAI = getGenAI();
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        
+        const prompt = `Classify these manuscript segments (from HTML) into: 
+        TITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.
+        
+        RULES:
+        - Return ONLY a JSON array of objects: { "label": "..." }.
+        - Order MUST match the input segments.
+        - TABLE: if tag is TABLE.
+        - FIGURE: if segment contains [[ID:img_...]].
+        - EQUATION: identify math.
+        
+        Segments:
+        ${JSON.stringify(blocks.slice(0, 100).map(b => ({ tag: b.tag, excerpt: b.text.substring(0, 500) })))}`;
+
+        const result = await model.generateContent(prompt);
+        const responseText = result.response.text().replace(/```json|```/g, "").trim();
+        const aiResults = JSON.parse(responseText);
+        
+        classified = blocks.map((b, i) => ({
+            text: b.text,
+            label: aiResults[i]?.label || (b.tag === 'TABLE' ? 'TABLE' : (b.html.includes('[[ID:img_') ? 'FIGURE' : 'BODY')),
+            html: b.html,
+            tag: b.tag
+        }));
+    } catch (aiErr) {
+        console.warn("AI Classification failed:", aiErr);
+        classified = blocks.map(b => ({
+            text: b.text,
+            label: b.tag === 'TABLE' ? 'TABLE' : (b.html.includes('[[ID:img_') ? 'FIGURE' : 'BODY'),
+            html: b.html,
+            tag: b.tag
+        }));
+    }
 
     res.json({
         file_id: file.filename,
         validation_score: 95,
         stats: {
-            label_distribution: classified.reduce((acc: any, p) => {
+            label_distribution: classified.reduce((acc: any, p: any) => {
                 acc[p.label] = (acc[p.label] || 0) + 1;
                 return acc;
             }, {})
@@ -280,6 +337,44 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     res.status(500).json({ detail: error.message });
   }
 });
+
+function htmlTableToDocx(html: string) {
+    try {
+        const root = parse(html);
+        const tableEl = root.querySelector('table');
+        if (!tableEl) return null;
+
+        const rows = tableEl.querySelectorAll('tr').map(tr => {
+            const cells = tr.querySelectorAll('td, th').map(td => {
+                return new TableCell({
+                    children: [new Paragraph({
+                        children: [new TextRun({ text: td.text.trim() || " ", size: 18 })]
+                    })],
+                    borders: {
+                        top: { style: BorderStyle.SINGLE, size: 4 },
+                        bottom: { style: BorderStyle.SINGLE, size: 4 },
+                        left: { style: BorderStyle.SINGLE, size: 4 },
+                        right: { style: BorderStyle.SINGLE, size: 4 },
+                    }
+                });
+            });
+            return cells.length > 0 ? new TableRow({ children: cells }) : null;
+        }).filter(r => r !== null) as TableRow[];
+
+        if (rows.length === 0) return null;
+
+        return new Table({ 
+            rows, 
+            width: { 
+                size: 100, 
+                type: WidthType.PERCENTAGE 
+            } 
+        });
+    } catch (e) {
+        console.error("Table conversion failed", e);
+        return null;
+    }
+}
 
 app.post("/api/process", async (req, res) => {
   try {
@@ -343,49 +438,102 @@ app.post("/api/process", async (req, res) => {
               right: convertInchesToTwip(rules.margins?.right || 1),
             }
           },
-          column: { count: rules.columns || 1, space: 708 }
+          column: (rules.columns && rules.columns > 1) ? { count: rules.columns, space: 708 } : undefined
         },
-        children: classified.map((p: any) => {
-          let alignment: any = (rules.alignment === "JUSTIFIED") ? AlignmentType.JUSTIFIED : AlignmentType.LEFT;
-          let fontSize = rules.font_size_body || 12;
-          let bold = false;
-          let text = p.text;
+        children: (() => {
+          const sectionChildren: any[] = [];
+          
+          for (const p of classified) {
+            if (p.label === "TABLE") {
+                const table = htmlTableToDocx(p.html);
+                if (table) {
+                    sectionChildren.push(table);
+                    continue;
+                }
+            }
+            
+            if (p.label === "FIGURE" && p.html.includes("[[ID:img_")) {
+                const match = p.html.match(/\[\[ID:(img_[^\]]+)\]\]/);
+                if (match) {
+                    const imgId = match[1];
+                    const imgPath = path.join(UPLOAD_DIR, `${imgId}.png`);
+                    if (fs.existsSync(imgPath)) {
+                        try {
+                            sectionChildren.push(new Paragraph({
+                                alignment: AlignmentType.CENTER,
+                                children: [
+                                    new ImageRun({
+                                        data: fs.readFileSync(imgPath),
+                                        transformation: { 
+                                            width: 450, 
+                                            height: 350 
+                                        }
+                                    } as any)
+                                ]
+                            }));
+                            if (p.text.length > 0 && !p.text.includes("[[ID:")) {
+                                sectionChildren.push(new Paragraph({
+                                    alignment: AlignmentType.CENTER,
+                                    children: [new TextRun({ text: p.text, size: 18, italics: true })]
+                                }));
+                            }
+                            continue;
+                        } catch (imgErr) {
+                            console.error("Image insertion failed", imgErr);
+                        }
+                    }
+                }
+            }
 
-          switch(p.label) {
-            case "TITLE":
-              alignment = AlignmentType.CENTER as any;
-              fontSize = rules.font_size_heading || 24;
-              bold = true;
-              text = text.toUpperCase();
-              break;
-            case "AUTHORS":
-              alignment = AlignmentType.CENTER as any;
-              fontSize += 1;
-              break;
-            case "ABSTRACT":
-              bold = true;
-              break;
-            case "HEADING1":
-              bold = true;
-              fontSize += 2;
-              text = text.toUpperCase();
-              break;
-            case "HEADING2":
-              bold = true;
-              break;
+            let alignment: any = (rules.alignment === "JUSTIFIED") ? AlignmentType.JUSTIFIED : AlignmentType.LEFT;
+            let fontSize = rules.font_size_body || 12;
+            let bold = false;
+            let italic = false;
+            let text = p.text;
+
+            switch(p.label) {
+              case "TITLE":
+                alignment = AlignmentType.CENTER;
+                fontSize = rules.font_size_heading || 24;
+                bold = true;
+                text = text.toUpperCase();
+                break;
+              case "AUTHORS":
+                alignment = AlignmentType.CENTER;
+                fontSize += 1;
+                break;
+              case "ABSTRACT":
+                bold = true;
+                break;
+              case "HEADING1":
+                bold = true;
+                fontSize += 2;
+                text = text.toUpperCase();
+                break;
+              case "HEADING2":
+                bold = true;
+                break;
+              case "EQUATION":
+                alignment = AlignmentType.CENTER;
+                fontSize += 1;
+                italic = true;
+                break;
+            }
+
+            sectionChildren.push(new Paragraph({
+              alignment: alignment,
+              children: [new TextRun({ 
+                  text: text || " ", 
+                  bold, 
+                  italics: italic,
+                  size: fontSize * 2,
+                  font: rules.font_family ? { name: rules.font_family } : undefined
+              })],
+              spacing: { line: Math.round((rules.line_spacing || 1.15) * 240), after: 120 }
+            }));
           }
-
-          return new Paragraph({
-            alignment: alignment as any,
-            children: [new TextRun({ 
-                text, 
-                bold, 
-                size: fontSize * 2,
-                font: rules.font_family 
-            })],
-            spacing: { line: (rules.line_spacing || 1.15) * 240, after: 120 }
-          });
-        })
+          return sectionChildren;
+        })()
       }]
     });
 

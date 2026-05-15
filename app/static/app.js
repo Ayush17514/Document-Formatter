@@ -162,6 +162,9 @@
                             <option value="ABSTRACT" ${block.label === 'ABSTRACT' ? 'selected' : ''}>Abstract Segment</option>
                             <option value="HEADING1" ${block.label === 'HEADING1' ? 'selected' : ''}>Primary Heading</option>
                             <option value="HEADING2" ${block.label === 'HEADING2' ? 'selected' : ''}>Sub-Heading</option>
+                            <option value="EQUATION" ${block.label === 'EQUATION' ? 'selected' : ''}>Math Equation</option>
+                            <option value="TABLE" ${block.label === 'TABLE' ? 'selected' : ''}>Data Table</option>
+                            <option value="FIGURE" ${block.label === 'FIGURE' ? 'selected' : ''}>Figure/Image</option>
                             <option value="REFERENCES" ${block.label === 'REFERENCES' ? 'selected' : ''}>Citation/Ref</option>
                         </select>
                         <div class="flex items-center gap-1.5 px-3 py-1 bg-white/5 rounded-lg border border-white/5">
@@ -192,6 +195,20 @@
             };
 
             const content = el.querySelector('.block-content');
+            
+            if (block.label === "TABLE") {
+                content.innerHTML = `<div class="bg-indigo-500/5 p-4 rounded-xl border border-indigo-500/10 overflow-x-auto text-xs">${block.html}</div>`;
+            } else if (block.label === "FIGURE") {
+                content.innerHTML = `
+                    <div class="bg-rose-500/5 p-6 rounded-2xl border border-rose-500/10 text-rose-300 italic flex flex-col items-center gap-3">
+                        <i data-lucide="image" class="w-8 h-8 opacity-50"></i>
+                        <span class="text-[10px] font-black uppercase tracking-widest">Structural Figure Asset</span>
+                        <p class="text-[11px] text-slate-500 not-italic">${block.text}</p>
+                    </div>`;
+            } else {
+                content.innerText = block.text;
+            }
+
             content.onblur = () => {
                 if (block.text !== content.innerText) {
                     block.text = content.innerText;
@@ -359,14 +376,28 @@
             
             // Render active rules list
             const rulesList = document.getElementById('rules-list');
-            const venue = activeVenues.find(v => v.id === pubSelect.value);
-            if (venue && rulesList) {
-                rulesList.innerHTML = venue.rules.map(rule => `
-                    <div class="flex items-center justify-between p-4 bg-white/5 border border-white/5 rounded-xl animate-in slide-in-from-right-4 duration-500">
-                        <span class="text-[10px] font-black text-slate-400 uppercase tracking-[0.1em]">${rule}</span>
-                        <i data-lucide="check-circle-2" class="w-3.5 h-3.5 text-green-500"></i>
-                    </div>
-                `).join('');
+            if (rulesList && currentRules) {
+                const ruleIcons = {
+                    font_family: 'type',
+                    font_size_body: 'text-cursor-input',
+                    columns: 'columns',
+                    line_spacing: 'lines',
+                    alignment: 'align-justify'
+                };
+                
+                rulesList.innerHTML = Object.entries(currentRules).map(([key, value]) => {
+                    if (key === 'margins') return ''; // Skip margins for now or handle separately
+                    const icon = ruleIcons[key] || 'settings';
+                    return `
+                        <div class="flex items-center justify-between p-4 bg-white/5 border border-white/5 rounded-xl animate-in slide-in-from-right-4 duration-500">
+                            <div class="flex items-center gap-3">
+                                <i data-lucide="${icon}" class="w-3.5 h-3.5 text-indigo-400"></i>
+                                <span class="text-[10px] font-black text-slate-400 uppercase tracking-[0.1em]">${key.replace(/_/g, ' ')}</span>
+                            </div>
+                            <span class="text-[10px] font-bold text-slate-200">${value}</span>
+                        </div>
+                    `;
+                }).join('');
                 lucide.createIcons();
             }
 
