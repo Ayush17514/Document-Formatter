@@ -1,0 +1,86 @@
+/* Custom Animations & Refinements */
+
+@keyframes pulse-slow {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 0.6; }
+}
+
+@keyframes slide-in-right {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes fade-out {
+    to { opacity: 0; transform: translateY(-10px); }
+}
+
+.animate-pulse-slow {
+    animation: pulse-slow 3s infinite;
+}
+
+.animate-slide-in-right {
+    animation: slide-in-right 0.3s ease-out;
+}
+
+.animate-fade-out {
+    animation: fade-out 0.3s ease-in forwards;
+}
+
+#score-ring {
+    text-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+}
+
+/* Custom Scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+}
+
+/* Interactive Mapper Blocks */
+.mapper-block {
+    @apply bg-white/[0.02] border border-white/5 rounded-3xl p-6 transition-all duration-500 hover:bg-white/[0.04] hover:border-white/10;
+}
+.mapper-block.selected {
+    @apply border-indigo-500/50 ring-4 ring-indigo-500/10 bg-indigo-500/[0.02];
+}
+
+/* Document Type Colors */
+.label-TITLE { border-left: 4px solid #f59e0b; }
+.label-AUTHORS { border-left: 4px solid #6366f1; }
+.label-ABSTRACT { border-left: 4px solid #10b981; }
+.label-BODY { border-left: 4px solid #64748b; }
+.label-REFERENCES { border-left: 4px solid #ec4899; }
+
+.sticky-sidebar {
+    position: sticky;
+    top: 5rem;
+    max-height: calc(100vh - 8rem);
+}
+
+/* Toast System */
+#toast-container {
+    perspective: 1000px;
+}
+.toast-item {
+    @apply flex items-center gap-4 bg-slate-950/80 border border-white/10 rounded-[1.25rem] p-5 shadow-2xl backdrop-blur-xl mb-4 border-l-4 border-l-indigo-500;
+}
+
+/* Editor States */
+.editing-content {
+    @apply ring-4 ring-indigo-500/10 bg-white/5 transition-all text-slate-100;
+}
+
+/* Typography Overrides */
+.font-serif {
+    font-family: 'Cormorant Garamond', serif;
+}
