@@ -19,6 +19,9 @@ from lxml import etree
 import json
 import google.generativeai as genai
 
+# Import the rules from the separate file
+from app.publication_rules import PUBLICATION_RULES, DEFAULT_RULES
+
 # Logging configuration
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -33,33 +36,8 @@ LABEL_HEADING2 = "HEADING2"
 LABEL_BODY = "BODY"
 LABEL_REFERENCES = "REFERENCES"
 LABEL_TABLE = "TABLE"
-LABEL_IMAGE = "IMAGE"
-
-# --- Publication Rules ---
-
-PUBLICATION_RULES = {
-  "Research Paper": {
-    "IEEE Access": {
-      "font_family": "Times New Roman",
-      "font_size_body": 10,
-      "font_size_heading": 18,
-      "columns": 2,
-      "line_spacing": 1.0,
-      "margins": { "top": 0.75, "bottom": 1.0, "left": 0.625, "right": 0.625 },
-      "alignment": "JUSTIFIED"
-    }
-  }
-}
-
-DEFAULT_RULES = {
-  "font_family": "Times New Roman",
-  "font_size_body": 12,
-  "font_size_heading": 14,
-  "columns": 1,
-  "line_spacing": 1.15,
-  "margins": { "top": 1.0, "bottom": 1.0, "left": 1.0, "right": 1.0 },
-  "alignment": "JUSTIFIED"
-}
+LABEL_FIGURE = "FIGURE"
+LABEL_EQUATION = "EQUATION"
 
 # --- AI Integration ---
 
@@ -329,6 +307,9 @@ class DocumentClassifier:
         if self.in_references:
             label = LABEL_REFERENCES
             confidence = 0.9
+        elif "(" in text and ")" in text and (text.startswith("(") or text.endswith(")")):
+             label = LABEL_EQUATION
+             confidence = 0.9
         elif element.get("index") == 0 and len(text) < 200:
             label = LABEL_TITLE
             confidence = 0.8
@@ -359,7 +340,7 @@ class DocumentClassifier:
         return element
 
     def _classify_image(self, element: Dict[str, Any]) -> Dict[str, Any]:
-        element["label"] = LABEL_IMAGE
+        element["label"] = LABEL_FIGURE
         element["confidence"] = 0.99
         return element
 
