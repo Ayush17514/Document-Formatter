@@ -481,7 +481,7 @@ def _format_table(doc: Document, t_data: Dict[str, Any], rules: Dict[str, Any]):
         return
 
     num_rows = len(table_data)
-    num_cols = len(table_data[0])
+    num_cols = len(table_data[0]) if num_rows > 0 else 0
     
     table = doc.add_table(rows=num_rows, cols=num_cols)
     table.style = 'Table Grid'
@@ -489,7 +489,8 @@ def _format_table(doc: Document, t_data: Dict[str, Any], rules: Dict[str, Any]):
     for i, row_data in enumerate(table_data):
         row_cells = table.rows[i].cells
         for j, cell_text in enumerate(row_data):
-            row_cells[j].text = cell_text
+            if j < len(row_cells):
+                row_cells[j].text = cell_text
 
 def _format_image(doc: Document, i_data: Dict[str, Any], rules: Dict[str, Any]):
     image_b64 = i_data['data']['content']
@@ -588,9 +589,26 @@ async def upload_file(file: UploadFile = File(...)):
         parsed = parse_document(filepath)
         classified = classify_document(parsed)
         
+        # The frontend JS expects a 'text' property on each classified element for display.
+        # We will add it here to avoid changing the JS, but keep the original structure in 'data'.
+        elements_for_frontend = []
+        for element in classified.get("elements", []):
+            new_element = element.copy()
+            if new_element.get("type") == "paragraph":
+                new_element["text"] = new_element.get("data", {}).get("text", "")
+            elif new_element.get("type") == "table":
+                rows = new_element.get("data", [])
+                text_repr = "\n".join([" | ".join(map(str, row)) for row in rows])
+                new_element["text"] = f"[TABLE]\n{text_repr}"
+            elif new_element.get("type") == "image":
+                new_element["text"] = "[IMAGE]"
+            else:
+                new_element["text"] = ""
+            elements_for_frontend.append(new_element)
+
         return {
             "file_id": file_id,
-            "classified": classified["elements"]
+            "classified": elements_for_frontend
         }
     except Exception as e:
         logger.exception(e)
@@ -599,6 +617,22 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/api/process")
 async def process_file(payload: Dict[str, Any]):
     try:
+        # The frontend sends back the data we patched with a 'text' property.
+        # We need to sync any user edits from 'text' back to 'data.text' before processing.
+        elements_from_frontend = payload.get("classified", [])
+        processed_elements = []
+        for element in elements_from_frontend:
+            # If the user edited a paragraph, the 'text' property will be updated by the JS.
+            if element.get("type") == "paragraph" and "text" in element and "data" in element:
+                if element["text"] != element["data"].get("text"):
+                    element["data"]["text"] = element["text"]
+            
+            # The 'text' property was temporary for the frontend, so remove it for backend processing.
+            element.pop("text", None)
+            processed_elements.append(element)
+        
+        payload["classified"] = processed_elements
+
         rules = await resolve_formatting_rules(payload["publication"], payload["doc_type"])
         
         optimized_elements = get_optimized_layout(payload["classified"])
