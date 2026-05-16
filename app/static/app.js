@@ -145,6 +145,12 @@
     // Render the Interactive Mapper
     function renderMapper() {
         mapperCont.innerHTML = '';
+        // Safety check: ensure currentClassifiedData is an array
+        if (!Array.isArray(currentClassifiedData) || currentClassifiedData.length === 0) {
+            mapperCont.innerHTML = '<p class="text-slate-500 text-center py-8">No classified data available.</p>';
+            return;
+        }
+        
         currentClassifiedData.forEach((block, idx) => {
             const el = document.createElement('div');
             el.className = `mapper-block group relative animate-in fade-in slide-in-from-left-2 duration-500 label-${block.label}`;
@@ -155,7 +161,7 @@
             el.innerHTML = `
                 <div class="flex items-center justify-between gap-4 mb-4 pb-4 border-b border-white/[0.03]">
                     <div class="flex items-center gap-3">
-                        <select class="block-type-select bg-white/5 border border-white/10 rounded-xl text-[10px] px-4 py-2 focus:ring-1 focus:ring-indigo-500 outline-none text-slate-300 font-black uppercase transition-all hover:bg-white/10 hover:border-white/20">
+                        <select class="block-type-select bg-white/5 border border-white/10 rounded-xl text-[10px] px-4 py-2 focus:ring-1 focus:ring-indigo-500 outline-none text-slate-300 font-black uppercase tracking-wider">
                             <option value="BODY" ${block.label === 'BODY' ? 'selected' : ''}>Body Paragraph</option>
                             <option value="TITLE" ${block.label === 'TITLE' ? 'selected' : ''}>Manuscript Title</option>
                             <option value="AUTHORS" ${block.label === 'AUTHORS' ? 'selected' : ''}>Authors & Affiliation</option>
@@ -245,6 +251,11 @@
         const issues = [];
         let score = 95;
 
+        // Safety check
+        if (!Array.isArray(currentClassifiedData)) {
+            currentClassifiedData = [];
+        }
+
         const labels = currentClassifiedData.map(b => b.label);
         const totalWords = currentClassifiedData.reduce((acc, b) => acc + b.text.split(/\s+/).filter(w => w.length > 0).length, 0);
         
@@ -312,7 +323,16 @@
             
             showToast("Manuscript uploaded and analyzed.", "success");
             currentFileId = data.file_id;
-            currentClassifiedData = data.classified;
+            // Safely extract classified data - fallback to empty array
+            currentClassifiedData = (data.classified || data.paragraphs || []);
+            
+            if (!Array.isArray(currentClassifiedData)) {
+                throw new Error("Invalid classified data format received from server");
+            }
+
+            if (currentClassifiedData.length === 0) {
+                throw new Error("No paragraphs were extracted from the document");
+            }
             
             renderMapper();
             validateManuscript();
@@ -320,7 +340,8 @@
             uploadSection.classList.add('hidden');
             detailsSection.classList.remove('hidden');
         } catch (e) {
-            alert(e.message);
+            console.error("Upload error:", e);
+            showToast(e.message, "error");
         } finally {
             hideLoader();
         }
