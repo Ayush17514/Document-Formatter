@@ -1,4 +1,3 @@
-import os
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -6,6 +5,7 @@ import multer from "multer";
 import mammoth from "mammoth";
 import cors from "cors";
 import dotenv from "dotenv";
+import express from "express";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, convertInchesToTwip } from "docx";
 import { spawnSync } from 'child_process';
