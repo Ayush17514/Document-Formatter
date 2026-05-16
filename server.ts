@@ -42,6 +42,38 @@ const OUTPUT_DIR = path.join(__dirname, "outputs");
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
+// Purge outputs older than N days to avoid disk buildup
+function purgeOldOutputs(days = 7) {
+  try {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const files = fs.readdirSync(OUTPUT_DIR);
+    files.forEach((f) => {
+      try {
+        const p = path.join(OUTPUT_DIR, f);
+        const stat = fs.statSync(p);
+        if (stat.mtimeMs < cutoff) fs.unlinkSync(p);
+      } catch (e) { /* ignore per-file errors */ }
+    });
+  } catch (e) { console.warn("Failed to purge old outputs:", e); }
+}
+
+// Helper: promise timeout wrapper
+function withTimeout<T>(promise: Promise<T>, ms = 15000): Promise<T> {
+  const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI_TIMEOUT')), ms));
+  return Promise.race([promise, timeout]);
+}
+
+// Helper: safely call model.generateContent with timeout and return text
+async function generateWithTimeout(model: any, prompt: string, ms = 15000) {
+  const response = await withTimeout(model.generateContent(prompt), ms);
+  // model.generateContent returns an object with response.text() or response.text
+  if (typeof response?.response?.text === 'function') return response.response.text();
+  if (typeof response?.response?.text === 'string') return response.response.text;
+  if (typeof response?.text === 'function') return response.text();
+  if (typeof response?.text === 'string') return response.text;
+  return JSON.stringify(response);
+}
+
 // Publication Rules - Production Registry
 const PUBLICATION_RULES: any = {
   "Research Paper": {
@@ -221,28 +253,32 @@ app.get("/api/options", (req, res) => {
 app.post("/api/latex", async (req, res) => {
     try {
         const { classified, publication } = req.body;
+        if (!Array.isArray(classified)) throw new Error("Invalid classified payload");
         const genAI = getGenAI();
         const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-        const prompt = `Convert this manuscript structure into a professional LaTeX document compatible with ${publication}. 
-        Return ONLY the raw .tex code. Content segments: ${JSON.stringify(classified.map((c: any) => ({ type: c.label, text: c.text })))}`;
+        const prompt = `Convert this manuscript structure into a professional LaTeX document compatible with ${publication}. \nReturn ONLY the raw .tex code. Content segments: ${JSON.stringify(classified.map((c: any) => ({ type: c.label, text: c.text })))} `;
         
-        const result = await model.generateContent(prompt);
-        let latex = result.response.text().replace(/```latex|```/g, "").trim();
-        res.json({ latex });
+        let text = await generateWithTimeout(model, prompt, 20000).catch((e) => { throw e; });
+        // strip fences
+        text = text.replace(/```latex|```/g, "").trim();
+        res.json({ latex: text });
     } catch (e: any) {
         const errorMsg = e?.message || "";
-        if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID")) {
-            res.status(400).json({ error: "A valid Gemini API key is required for LaTeX generation. Please check your secrets." });
+        if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID") || errorMsg === 'AI_TIMEOUT') {
+            res.status(400).json({ error: "A valid Gemini API key is required for LaTeX generation or the request timed out. Please check your secrets." });
         } else {
+            console.error('LaTeX generation error:', e);
             res.status(500).json({ error: "LaTeX Generation Failed" });
         }
     }
 });
 
 app.post("/api/upload", upload.single("file"), async (req: any, res) => {
+  let filePath = null;
   try {
     const file = req.file;
     if (!file) throw new Error("No file uploaded");
+    filePath = file.path;
     
     // Parse using mammoth to obtain HTML which preserves some structure (tables)
     const htmlResult = await mammoth.convertToHtml({ path: file.path });
@@ -251,35 +287,35 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     // Split into chunks based on paragraphs and structural elements
     // We use a simplified split for the AI to process
     const rawTextResult = await mammoth.extractRawText({ path: file.path });
-    const fullText = rawTextResult.value;
+    const fullText = rawTextResult.value || "";
     const paragraphs = fullText.split("\n").filter(t => t.trim() !== "");
 
-    let classified = [];
+    let classified: any = [];
     
     try {
         const genAI = getGenAI();
         const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         
-        const prompt = `Analyze this manuscript text and classify each segment into one of these labels: 
-        TITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.
-        
-        RULES:
-        - Return ONLY a JSON array of objects: { "text": "...", "label": "..." }.
-        - Combine very short related lines if necessary.
-        - Identify math equations even if they look like text.
-        - Identify table headers and data.
-        - Identify figure captions as FIGURE.
-        
-        Manuscript segments:
-        ${JSON.stringify(paragraphs.slice(0, 80))} // Process first 80 segments to keep tokens manageable`;
+        const prompt = `Analyze this manuscript text and classify each segment into one of these labels: \nTITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.\n\nRULES:\n- Return ONLY a JSON array of objects: { \"text\": \"...\", \"label\": \"...\" }.\n- Combine very short related lines if necessary.\n- Identify math equations even if they look like text.\n- Identify table headers and data.\n- Identify figure captions as FIGURE.\n\nManuscript segments:\n${JSON.stringify(paragraphs.slice(0, 80))} // Process first 80 segments to keep tokens manageable`;
 
-        const result = await model.generateContent(prompt);
-        const responseText = result.response.text().replace(/```json|```/g, "").trim();
-        classified = JSON.parse(responseText);
+        let responseText = await generateWithTimeout(model, prompt, 20000);
+        responseText = responseText.replace(/```json|```/g, "").trim();
+        try {
+            const parsed = JSON.parse(responseText);
+            if (Array.isArray(parsed)) classified = parsed;
+            else throw new Error('AI returned non-array');
+        } catch (e) {
+            console.warn('AI returned invalid JSON classification, falling back to heuristics', e);
+            // Fall through to heuristics below
+            classified = [];
+        }
     } catch (aiErr) {
-        console.warn("AI Classification failed, falling back to heuristics:", aiErr);
-        // Heuristic Fallback
-        classified = paragraphs.map((t, i) => {
+        console.warn("AI Classification failed or timed out, falling back to heuristics:", aiErr);
+    }
+
+    // Heuristic Fallback if classified empty
+    if (!Array.isArray(classified) || classified.length === 0) {
+        classified = paragraphs.map((t: string, i: number) => {
           let label = "BODY";
           const tLower = t.toLowerCase().trim();
           const tClean = t.trim();
@@ -294,20 +330,43 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
         });
     }
 
+    // Normalize elements: ensure each item has text & label fields
+    classified = classified.map((item: any) => {
+      if (typeof item === 'string') return { text: item, label: 'BODY' };
+      if (item && item.text && item.label) return { text: String(item.text), label: String(item.label) };
+      // maybe old python classifier format
+      if (item && item.data && item.data.text) return { text: String(item.data.text), label: item.label || 'BODY' };
+      return { text: String(item?.text || ''), label: String(item?.label || 'BODY') };
+    });
+
+    // If still empty, return error
+    if (!Array.isArray(classified) || classified.length === 0) {
+        res.status(422).json({ detail: 'No paragraphs were extracted from the document' });
+        return;
+    }
+
+    // Stats
+    const label_distribution = classified.reduce((acc: any, p: any) => {
+        acc[p.label] = (acc[p.label] || 0) + 1;
+        return acc;
+    }, {});
+
+    // Clean older outputs asynchronously
+    setImmediate(() => purgeOldOutputs(7));
+
     res.json({
         file_id: file.filename,
         validation_score: 95,
         paragraphs: classified,
-        stats: {
-            label_distribution: classified.reduce((acc: any, p: any) => {
-                acc[p.label] = (acc[p.label] || 0) + 1;
-                return acc;
-            }, {})
-        },
+        stats: { label_distribution },
         classified
     });
   } catch (error: any) {
+    console.error('Upload processing error:', error);
     res.status(500).json({ detail: error.message });
+  } finally {
+    // Always try to remove uploaded file to avoid disk buildup
+    try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch (e) { console.warn('Failed to delete upload', e); }
   }
 });
 
@@ -316,19 +375,21 @@ app.post("/api/process", async (req, res) => {
     const { file_id, doc_type, publication, fix_references } = req.body;
     let { classified } = req.body;
     
+    if (!Array.isArray(classified)) classified = [];
+
     // Feature 5: AI Reference Correction
-    if (fix_references) {
+    if (fix_references && Array.isArray(classified)) {
         try {
             const refBlocks = classified.filter((b: any) => b.label === "REFERENCES");
             if (refBlocks.length > 0) {
                 const genAI = getGenAI();
                 const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-                const prompt = `Reformat these academic references strictly into the ${publication} style. 
-                Keep exactly the same number of items. Return ONLY a JSON array of strings.
-                Input: ${JSON.stringify(refBlocks.map((b: any) => b.text))}`;
+                const prompt = `Reformat these academic references strictly into the ${publication} style. \nKeep exactly the same number of items. Return ONLY a JSON array of strings.\nInput: ${JSON.stringify(refBlocks.map((b: any) => b.text))}`;
                 
-                const result = await model.generateContent(prompt);
-                const corrected = JSON.parse(result.response.text().replace(/```json|```/g, "").trim());
+                let text = await generateWithTimeout(model, prompt, 20000);
+                text = text.replace(/```json|```/g, "").trim();
+                let corrected = [];
+                try { corrected = JSON.parse(text); } catch (e) { console.warn('Reference correction returned invalid JSON', e); }
                 
                 let j = 0;
                 classified = classified.map((b: any) => {
@@ -338,8 +399,8 @@ app.post("/api/process", async (req, res) => {
             }
         } catch (e: any) {
             const errorMsg = e?.message || "";
-            if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID")) {
-                console.warn("Skipping Reference Correction: Invalid or missing API key.");
+            if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID") || errorMsg === 'AI_TIMEOUT') {
+                console.warn("Skipping Reference Correction: Invalid or missing API key or timeout.");
             } else {
                 console.error("Reference correction failed", e);
             }
@@ -353,12 +414,11 @@ app.post("/api/process", async (req, res) => {
     } else {
       try {
         const model = getGenAI().getGenerativeModel({ model: "gemini-pro" });
-        const prompt = `Return ONLY JSON for manuscript formatting rules (publication: ${publication}, type: ${doc_type}). 
-          Required: font_family, font_size_body, font_size_heading, columns, line_spacing, margins (t,b,l,r), alignment (JUSTIFIED/LEFT).`;
-        const result = await model.generateContent(prompt);
-        rules = JSON.parse(result.response.text().replace(/```json|```/g, "").trim());
+        const prompt = `Return ONLY JSON for manuscript formatting rules (publication: ${publication}, type: ${doc_type}). \n  Required: font_family, font_size_body, font_size_heading, columns, line_spacing, margins (t,b,l,r), alignment (JUSTIFIED/LEFT).`;
+        let text = await generateWithTimeout(model, prompt, 15000);
+        rules = JSON.parse(text.replace(/```json|```/g, "").trim());
         if (!rules.alignment) rules.alignment = "JUSTIFIED";
-      } catch (e) { }
+      } catch (e) { console.warn('Dynamic rules resolution failed, using defaults', e); }
     }
 
     // Step 2: DOCX Generation
@@ -375,12 +435,12 @@ app.post("/api/process", async (req, res) => {
           },
             column: { count: rules.columns || 1, space: 708 }
           },
-          children: classified.map((p: any) => {
+          children: (Array.isArray(classified) ? classified : []).map((p: any) => {
           let alignment: any = (rules.alignment === "JUSTIFIED") ? AlignmentType.JUSTIFIED : AlignmentType.LEFT;
           let fontSize = rules.font_size_body || 12;
           let bold = false;
           let italic = false;
-          let text = p.text;
+          let text = (p && p.text) ? p.text : '';
 
           switch(p.label) {
             case "TITLE":
@@ -428,7 +488,7 @@ app.post("/api/process", async (req, res) => {
                 text, 
                 bold, 
                 italics: italic,
-                size: fontSize * 2,
+                size: Math.max(1, Math.floor(fontSize)) * 2,
                 font: rules.font_family ? { name: rules.font_family } : undefined
             })],
             spacing: { line: Math.round((rules.line_spacing || 1.15) * 240), after: 120 }
@@ -444,6 +504,9 @@ app.post("/api/process", async (req, res) => {
 
     // Step 3: Visual Preview Generation
     const htmlResult = await mammoth.convertToHtml({ buffer });
+
+    // Clean older outputs asynchronously
+    setImmediate(() => purgeOldOutputs(7));
 
     res.json({
         status: "success",

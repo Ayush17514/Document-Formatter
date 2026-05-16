@@ -18,7 +18,7 @@ def get_optimized_layout(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         return elements
 
     # Prepare the content for the AI
-    text_content = "\n".join([e['data']['text'] for e in elements if e['type'] == 'paragraph'])
+    text_content = "\n".join([e['data']['text'] for e in elements if e.get('type') == 'paragraph' and e.get('data')])
     
     prompt = f"""
     You are an expert in document layout and formatting.
@@ -34,15 +34,24 @@ def get_optimized_layout(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     For example: 0,1,3,2,4
     
     Original elements (with their index):
-    {[(i, e['type']) for i, e in enumerate(elements)]}
+    {[(i, e.get('type')) for i, e in enumerate(elements)]}
     """
 
     try:
         response = client.generate_content(prompt)
         new_order_str = response.text.strip()
         
-        # Parse the new order
-        new_order = [int(i) for i in new_order_str.split(',')]
+        # Parse the new order safely
+        new_order = []
+        for token in new_order_str.split(','):
+            token = token.strip()
+            if token == '':
+                continue
+            try:
+                new_order.append(int(token))
+            except ValueError:
+                logger.warning(f"Skipping invalid index from AI: {token}")
+                continue
         
         if len(new_order) != len(elements):
             logger.warning("AI returned an invalid new order. Using original order.")
@@ -57,4 +66,3 @@ def get_optimized_layout(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     except Exception as e:
         logger.error(f"AI layout optimization failed: {e}. Using original order.")
         return elements
-

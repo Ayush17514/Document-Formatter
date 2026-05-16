@@ -26,7 +26,7 @@ class DocumentClassifier:
                 j = i
                 pseudo_table_buffer = []
                 while j < len(elements) and elements[j].get("type") == "paragraph":
-                    text = elements[j]["data"]["text"]
+                    text = elements[j]["data"]["text"] if elements[j].get('data') else elements[j].get('text', '')
                     # Heuristic: a line is part of a pseudo-table if it's short.
                     if len(text.split()) < 5 and text.strip() != "":
                         pseudo_table_buffer.append(elements[j])
@@ -36,7 +36,7 @@ class DocumentClassifier:
                 
                 # If we have a sequence of short paragraphs, treat it as a table.
                 if len(pseudo_table_buffer) > 2: # at least 3 lines to be considered a table
-                    table_data = [[p['data']['text']] for p in pseudo_table_buffer]
+                    table_data = [[p['data']['text'] if p.get('data') else p.get('text','')] for p in pseudo_table_buffer]
                     
                     new_table_element = {
                         "type": "table",
@@ -65,7 +65,7 @@ class DocumentClassifier:
         return classified_elements
 
     def _classify_paragraph(self, element: Dict[str, Any]) -> Dict[str, Any]:
-        text = element["data"]["text"]
+        text = element['data']['text'] if element.get('data') else element.get('text','')
         text_lower = text.lower()
         
         label = LABEL_BODY
@@ -74,16 +74,17 @@ class DocumentClassifier:
         if self.in_references:
             label = LABEL_REFERENCES
             confidence = 0.9
-        elif element["index"] == 0 and len(text) < 200:
+        elif element.get("index") == 0 and len(text) < 200:
             label = LABEL_TITLE
             confidence = 0.8
-        elif element["index"] < 5 and (re.search(r"@|\w+, \w+", text) or "university" in text_lower):
+        elif element.get("index", 999) < 5 and (re.search(r"@|\w+, \w+", text) or "university" in text_lower):
             label = LABEL_AUTHORS
             confidence = 0.8
-        elif "abstract" in text_lower and len(text) < 20:
+        # Consider 'abstract' appearing anywhere and be more permissive on length
+        elif "abstract" in text_lower:
             label = LABEL_ABSTRACT
             confidence = 0.95
-        elif text_lower in ["references", "bibliography", "works cited"]:
+        elif text_lower.strip() in ["references", "bibliography", "works cited"]:
             label = LABEL_REFERENCES
             self.in_references = True
             confidence = 0.99
@@ -110,5 +111,5 @@ class DocumentClassifier:
 
 def classify_document(parsed_data: dict) -> dict:
     classifier = DocumentClassifier()
-    parsed_data["elements"] = classifier.classify(parsed_data["elements"])
+    parsed_data["elements"] = classifier.classify(parsed_data.get("elements", []))
     return parsed_data

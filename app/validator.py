@@ -1,8 +1,8 @@
 def validate_document(classified_data: dict) -> dict:
-    # Handle both 'paragraphs' and 'classified' keys for backward compatibility
-    paragraphs = classified_data.get("paragraphs") or classified_data.get("classified", [])
-    
-    if not paragraphs:
+    # Accept both 'paragraphs' and 'classified' keys
+    paragraphs = classified_data.get("paragraphs") or classified_data.get("classified") or []
+
+    if not isinstance(paragraphs, list) or len(paragraphs) == 0:
         return {
             "score": 0,
             "issues": ["No paragraphs found in classified data"],
@@ -11,8 +11,8 @@ def validate_document(classified_data: dict) -> dict:
                 "label_distribution": {}
             }
         }
-    
-    labels = [p["label"] for p in paragraphs]
+
+    labels = [p.get("label", "UNKNOWN") for p in paragraphs]
     
     issues = []
     score = 100
