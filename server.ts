@@ -297,6 +297,7 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     res.json({
         file_id: file.filename,
         validation_score: 95,
+        paragraphs: classified,
         stats: {
             label_distribution: classified.reduce((acc: any, p: any) => {
                 acc[p.label] = (acc[p.label] || 0) + 1;
