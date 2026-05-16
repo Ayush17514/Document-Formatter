@@ -451,7 +451,7 @@ def _format_paragraph(doc: Document, p_data: Dict[str, Any], rules: Dict[str, An
         run = para.add_run("Abstract — ")
         run.bold = True
         para.add_run(text)
-        para.alignment = WD_ALIGN_PARAGraph.JUSTIFY
+        para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     elif label == "HEADING1":
         run = para.add_run(text.upper())
         run.bold = True
@@ -587,43 +587,29 @@ async def upload_file(file: UploadFile = File(...)):
     try:
         parsed = parse_document(filepath)
         classified = classify_document(parsed)
-        validation = validate_document(classified)
         
-        # Save the classified data to a file
-        with open(os.path.join(UPLOAD_DIR, f"{file_id}.json"), "w") as f:
-            json.dump(classified, f)
-
         return {
             "file_id": file_id,
-            "validation_score": validation["score"],
-            "stats": validation["stats"],
-            "classified": classified
+            "classified": classified["elements"]
         }
     except Exception as e:
         logger.exception(e)
         raise HTTPException(status_code=500, detail=f"Parsing failed: {str(e)}")
 
 @app.post("/api/process")
-async def process_file(
-    file_id: str = Form(...),
-    doc_type: str = Form(...),
-    publication: str = Form(...),
-    classified: str = Form(...)
-):
-    classified_data = json.loads(classified)
+async def process_file(payload: Dict[str, Any]):
     try:
-        rules = await resolve_formatting_rules(publication, doc_type)
+        rules = await resolve_formatting_rules(payload["publication"], payload["doc_type"])
         
-        optimized_elements = get_optimized_layout(classified_data["elements"])
-        classified_data["elements"] = optimized_elements
+        optimized_elements = get_optimized_layout(payload["classified"])
         
-        output_filename = f"formatted_{file_id}.docx"
+        output_filename = f"formatted_{payload['file_id']}.docx"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         
         format_manuscript(
-            classified_data=classified_data,
-            publication=publication,
-            doc_type=doc_type,
+            classified_data={"elements": optimized_elements},
+            publication=payload["publication"],
+            doc_type=payload["doc_type"],
             output_path=output_path,
             rules=rules
         )
@@ -658,4 +644,5 @@ async def startup_event():
     """Clean up old files on startup."""
     for directory in [UPLOAD_DIR, OUTPUT_DIR]:
         for filename in os.listdir(directory):
-            os.remove(os.path.join(directory, filename))
+            if os.path.isfile(os.path.join(directory, filename)):
+                os.remove(os.path.join(directory, filename))
