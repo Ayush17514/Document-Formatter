@@ -1,15 +1,44 @@
 from docx import Document
-from typing import Any
+from typing import Any, List, Dict
 from app.utils.logger import logger
 import base64
 from docx.document import Document as DocumentObject
 from docx.table import Table
+import zipfile
+from lxml import etree
+
+
+def _extract_text_from_docx_xml(filepath: str) -> List[str]:
+    """Extract text nodes (w:t) from all .xml parts inside the .docx zip.
+    This helps recover text placed in textboxes/shapes or other parts
+    that python-docx.doc.paragraphs may miss.
+    """
+    texts: List[str] = []
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        with zipfile.ZipFile(filepath, "r") as z:
+            for name in z.namelist():
+                if not name.endswith(".xml"):
+                    continue
+                try:
+                    raw = z.read(name)
+                    root = etree.fromstring(raw)
+                    for t in root.findall(".//w:t", namespaces=ns):
+                        if t is not None and t.text and t.text.strip():
+                            texts.append(t.text.strip())
+                except Exception:
+                    # ignore parsing issues for non-well-formed xml parts
+                    continue
+    except Exception:
+        return []
+    return texts
+
 
 def parse_document(filepath: str) -> dict[str, Any]:
     try:
         doc = Document(filepath)
         
-        elements = []
+        elements: List[Dict[str, Any]] = []
         
         # Helper to process and add elements
         def add_element(element_type, data, index):
@@ -59,6 +88,19 @@ def parse_document(filepath: str) -> dict[str, Any]:
                     add_element("image", {"content": image_data, "content_type": shape.part.content_type}, len(elements))
             except Exception:
                 continue
+
+        # XML fallback: if no elements were recovered via python-docx,
+        # attempt to pull text nodes from the .docx zip (covers textboxes/shapes)
+        if len(elements) == 0:
+            xml_texts = _extract_text_from_docx_xml(filepath)
+            if xml_texts:
+                for i, t in enumerate(xml_texts):
+                    elements.append({
+                        "type": "paragraph",
+                        "data": {"text": t, "style": "Unknown"},
+                        "index": i
+                    })
+                logger.info(f"XML fallback recovered {len(xml_texts)} text nodes from docx: {filepath}")
 
         return {
             "elements": elements,
