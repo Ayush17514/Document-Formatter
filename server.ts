@@ -1,4 +1,4 @@
-import express from "express";
+import os
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -8,6 +8,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, convertInchesToTwip } from "docx";
+import { spawnSync } from 'child_process';
 
 dotenv.config();
 
@@ -72,6 +73,15 @@ async function generateWithTimeout(model: any, prompt: string, ms = 15000) {
   if (typeof response?.text === 'function') return response.text();
   if (typeof response?.text === 'string') return response.text;
   return JSON.stringify(response);
+}
+
+// Helper: convert HTML to simple paragraph strings
+function htmlToParagraphs(html: string) {
+  if (!html) return [];
+  let t = html.replace(/<\/?p[^>]*>/gi, '\n');
+  t = t.replace(/<[^>]+>/g, '');
+  t = t.replace(/&nbsp;/g, ' ');
+  return t.split('\n').map(s => s.trim()).filter(Boolean);
 }
 
 // Publication Rules - Production Registry
@@ -289,6 +299,41 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     const rawTextResult = await mammoth.extractRawText({ path: file.path });
     const fullText = rawTextResult.value || "";
     const paragraphs = fullText.split("\n").filter(t => t.trim() !== "");
+
+    // If mammoth path-based rawText is empty, try buffer-based extraction
+    if (!paragraphs || paragraphs.length === 0) {
+      try {
+        const buf = fs.readFileSync(file.path);
+        const rawBufferResult = await mammoth.extractRawText({ buffer: buf }).catch(()=>({ value: '' }));
+        const fullBufferText = rawBufferResult.value || '';
+        if (fullBufferText && fullBufferText.trim()) {
+          paragraphs.push(...fullBufferText.split('\n').filter(t => t.trim() !== ''));
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    // If still empty, try HTML fallback
+    if (!paragraphs || paragraphs.length === 0) {
+      const htmlFallback = (await mammoth.convertToHtml({ path: file.path })).value || '';
+      const extracted = htmlToParagraphs(htmlFallback);
+      if (extracted && extracted.length) paragraphs.push(...extracted);
+    }
+
+    // If still empty, attempt python-cli fallback using python parse_cli.py
+    if (!paragraphs || paragraphs.length === 0) {
+      try {
+        const py = spawnSync('python3', [path.join(__dirname, 'app/parse_cli.py'), file.path], { encoding: 'utf8' });
+        if (py.status === 0 && py.stdout) {
+          const parsed = JSON.parse(py.stdout);
+          if (Array.isArray(parsed) && parsed.length) {
+            paragraphs.push(...parsed);
+            console.log('Python parser recovered paragraphs:', parsed.length);
+          }
+        } else {
+          console.warn('Python parser failed', py.stderr || py.stdout);
+        }
+      } catch (e) { console.warn('Python fallback failed', e); }
+    }
 
     let classified: any = [];
     
