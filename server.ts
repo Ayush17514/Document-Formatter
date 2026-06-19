@@ -6,6 +6,9 @@ import mammoth from "mammoth";
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
+import crypto from "crypto";
+import { authenticator } from "otplib";
+import QRCode from "qrcode";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, convertInchesToTwip } from "docx";
 import { spawnSync } from 'child_process';
@@ -249,8 +252,271 @@ const DEFAULT_RULES = {
   margins: { top: 1.0, bottom: 1.0, left: 1.0, right: 1.0 },
   alignment: "JUSTIFIED"
 };
+// --- User Database & Auth State ---
+
+const USERS_FILE = path.join(__dirname, "users.json");
+
+interface UserRecord {
+  name: string;
+  email: string;
+  passwordHash: string;
+  salt: string;
+  totpSecret: string;
+  joinedAt: string;
+}
+
+class UserDb {
+  private static loadUsers(): Record<string, UserRecord> {
+    try {
+      if (!fs.existsSync(USERS_FILE)) {
+        fs.writeFileSync(USERS_FILE, JSON.stringify({}), "utf8");
+      }
+      const data = fs.readFileSync(USERS_FILE, "utf8");
+      return JSON.parse(data);
+    } catch (e) {
+      console.error("Error loading users database", e);
+      return {};
+    }
+  }
+
+  private static saveUsers(users: Record<string, UserRecord>) {
+    try {
+      fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf8");
+    } catch (e) {
+      console.error("Error saving users database", e);
+    }
+  }
+
+  public static getUser(email: string): UserRecord | null {
+    const users = this.loadUsers();
+    return users[email.toLowerCase().trim()] || null;
+  }
+
+  public static createUser(name: string, email: string, passwordHash: string, salt: string, totpSecret: string): UserRecord {
+    const users = this.loadUsers();
+    const cleanEmail = email.toLowerCase().trim();
+    const newUser: UserRecord = {
+      name,
+      email: cleanEmail,
+      passwordHash,
+      salt,
+      totpSecret,
+      joinedAt: new Date().toISOString()
+    };
+    users[cleanEmail] = newUser;
+    this.saveUsers(users);
+    return newUser;
+  }
+
+  public static updateUser(email: string, updates: Partial<UserRecord>) {
+    const users = this.loadUsers();
+    const cleanEmail = email.toLowerCase().trim();
+    if (users[cleanEmail]) {
+      users[cleanEmail] = { ...users[cleanEmail], ...updates };
+      this.saveUsers(users);
+    }
+  }
+
+  public static hashPassword(password: string, salt: string): string {
+    return crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+  }
+
+  public static generateSalt(): string {
+    return crypto.randomBytes(16).toString("hex");
+  }
+}
+
+const pendingSignups = new Map<string, {
+  name: string;
+  email: string;
+  passwordHash: string;
+  salt: string;
+  totpSecret: string;
+  expiresAt: number;
+}>();
 
 // --- Routes ---
+
+app.post("/api/auth/signup/init", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ detail: "Missing required fields" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    if (UserDb.getUser(cleanEmail)) {
+      return res.status(400).json({ detail: "Email already registered" });
+    }
+
+    // Generate TOTP Secret
+    const secret = authenticator.generateSecret();
+    const otpauth = authenticator.keyuri(cleanEmail, "ManuscriptAI", secret);
+
+    // Generate QR Code data URL
+    const qrCodeDataUrl = await QRCode.toDataURL(otpauth);
+
+    // Hash password now and hold in pending memory
+    const salt = UserDb.generateSalt();
+    const passwordHash = UserDb.hashPassword(password, salt);
+
+    pendingSignups.set(cleanEmail, {
+      name,
+      email: cleanEmail,
+      passwordHash,
+      salt,
+      totpSecret: secret,
+      expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes expiration
+    });
+
+    res.json({
+      qrCode: qrCodeDataUrl,
+      secret: secret
+    });
+  } catch (error: any) {
+    console.error("Signup init error:", error);
+    res.status(500).json({ detail: "Failed to initialize verification: " + error.message });
+  }
+});
+
+app.post("/api/auth/signup/verify", async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ detail: "Missing required fields" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const pending = pendingSignups.get(cleanEmail);
+
+    if (!pending || pending.expiresAt < Date.now()) {
+      pendingSignups.delete(cleanEmail);
+      return res.status(400).json({ detail: "Signup session expired or not found. Please start over." });
+    }
+
+    // Verify TOTP token
+    const isValid = authenticator.verify({ token: code, secret: pending.totpSecret });
+    if (!isValid) {
+      return res.status(400).json({ detail: "Invalid verification code. Please check Microsoft Authenticator." });
+    }
+
+    // Save user to JSON database
+    const user = UserDb.createUser(
+      pending.name,
+      pending.email,
+      pending.passwordHash,
+      pending.salt,
+      pending.totpSecret
+    );
+
+    // Cleanup pending signup
+    pendingSignups.delete(cleanEmail);
+
+    const token = crypto.randomBytes(32).toString("hex");
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        name: user.name,
+        email: user.email,
+        joinedAt: user.joinedAt
+      }
+    });
+  } catch (error: any) {
+    console.error("Signup verify error:", error);
+    res.status(500).json({ detail: "Verification failed: " + error.message });
+  }
+});
+
+app.post("/api/auth/login/init", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ detail: "Missing required fields" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const user = UserDb.getUser(cleanEmail);
+    if (!user) {
+      return res.status(400).json({ detail: "Invalid email or password" });
+    }
+
+    const hash = UserDb.hashPassword(password, user.salt);
+    if (hash !== user.passwordHash) {
+      return res.status(400).json({ detail: "Invalid email or password" });
+    }
+
+    res.json({
+      mfaRequired: true,
+      email: user.email
+    });
+  } catch (error: any) {
+    console.error("Login init error:", error);
+    res.status(500).json({ detail: "Authentication failed: " + error.message });
+  }
+});
+
+app.post("/api/auth/login/verify", async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ detail: "Missing required fields" });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const user = UserDb.getUser(cleanEmail);
+    if (!user) {
+      return res.status(400).json({ detail: "Authentication session not found" });
+    }
+
+    // Verify TOTP token
+    const isValid = authenticator.verify({ token: code, secret: user.totpSecret });
+    if (!isValid) {
+      return res.status(400).json({ detail: "Invalid MFA code. Please check Microsoft Authenticator." });
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        name: user.name,
+        email: user.email,
+        joinedAt: user.joinedAt
+      }
+    });
+  } catch (error: any) {
+    console.error("Login verify error:", error);
+    res.status(500).json({ detail: "MFA verification failed: " + error.message });
+  }
+});
+
+app.post("/api/auth/profile/update", async (req, res) => {
+  try {
+    const { email, name } = req.body;
+    if (!email || !name) {
+      return res.status(400).json({ detail: "Missing required fields" });
+    }
+    const cleanEmail = email.toLowerCase().trim();
+    const user = UserDb.getUser(cleanEmail);
+    if (!user) {
+      return res.status(404).json({ detail: "User not found" });
+    }
+    UserDb.updateUser(cleanEmail, { name });
+    res.json({
+      success: true,
+      user: {
+        name: name,
+        email: user.email,
+        joinedAt: user.joinedAt
+      }
+    });
+  } catch (error: any) {
+    res.status(500).json({ detail: "Failed to update profile: " + error.message });
+  }
+});
 
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "app/static/index.html"));
@@ -417,13 +683,13 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
 
 app.post("/api/process", async (req, res) => {
   try {
-    const { file_id, doc_type, publication, fix_references } = req.body;
+    const { file_id, doc_type, publication, fix_references, preview_only } = req.body;
     let { classified } = req.body;
     
     if (!Array.isArray(classified)) classified = [];
 
     // Feature 5: AI Reference Correction
-    if (fix_references && Array.isArray(classified)) {
+    if (fix_references && !preview_only && Array.isArray(classified)) {
         try {
             const refBlocks = classified.filter((b: any) => b.label === "REFERENCES");
             if (refBlocks.length > 0) {
@@ -468,6 +734,34 @@ app.post("/api/process", async (req, res) => {
 
     // Step 2: DOCX Generation
     const doc = new Document({
+      styles: {
+        paragraphStyles: [
+          {
+            id: "TITLE",
+            name: "TITLE",
+            basedOn: "Normal",
+            next: "Normal"
+          },
+          {
+            id: "AUTHORS",
+            name: "AUTHORS",
+            basedOn: "Normal",
+            next: "Normal"
+          },
+          {
+            id: "EQUATION",
+            name: "EQUATION",
+            basedOn: "Normal",
+            next: "Normal"
+          },
+          {
+            id: "FIGURE",
+            name: "FIGURE",
+            basedOn: "Normal",
+            next: "Normal"
+          }
+        ]
+      },
       sections: [{
         properties: {
           page: {
@@ -528,6 +822,7 @@ app.post("/api/process", async (req, res) => {
           }
 
           return new Paragraph({
+            style: p.label,
             alignment: alignment,
             children: [new TextRun({ 
                 text, 
@@ -542,13 +837,25 @@ app.post("/api/process", async (req, res) => {
       }]
     });
 
-    const outputFilename = `formatted_${file_id}.docx`;
-    const outputPath = path.join(OUTPUT_DIR, outputFilename);
     const buffer = await Packer.toBuffer(doc);
-    fs.writeFileSync(outputPath, buffer);
+    if (!preview_only) {
+        const outputFilename = `formatted_${file_id}.docx`;
+        const outputPath = path.join(OUTPUT_DIR, outputFilename);
+        fs.writeFileSync(outputPath, buffer);
+    }
 
     // Step 3: Visual Preview Generation
-    const htmlResult = await mammoth.convertToHtml({ buffer });
+    const htmlResult = await mammoth.convertToHtml(
+        { buffer },
+        {
+            styleMap: [
+                "p[style-name='TITLE'] => p.ql-align-center:fresh",
+                "p[style-name='AUTHORS'] => p.ql-align-center:fresh",
+                "p[style-name='EQUATION'] => p.ql-align-center:fresh",
+                "p[style-name='FIGURE'] => p.ql-align-center:fresh"
+            ]
+        }
+    );
 
     // Clean older outputs asynchronously
     setImmediate(() => purgeOldOutputs(7));

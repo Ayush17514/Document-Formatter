@@ -1,0 +1,18 @@
+{
+  "2024csayush17514@poornima.edu.in": {
+    "name": "Ayush Agrawal",
+    "email": "2024csayush17514@poornima.edu.in",
+    "passwordHash": "171ddd3f780a9f4d4ae90dbe44118f3ed226e7195eeb9e1fc17d1e479c61248287e3b975f4bd1d0ab743052c0f13b15f21e21e406f4301bb7e8e27fa24b42fd9",
+    "salt": "ed3e9985d817e833fd559d3bc06cfd59",
+    "totpSecret": "FR5FU5BRDM5E6DTZ",
+    "joinedAt": "2026-06-19T16:11:17.333Z"
+  },
+  "ayushagrawal0429@gmail.com": {
+    "name": "Ayush Agrawal",
+    "email": "ayushagrawal0429@gmail.com",
+    "passwordHash": "de322cb494e6d06c42b96d5f2b783545778c4df3d68762edae7b09f0a677377c94ebe0468190c80c5db0def1deb2777059c776123e5c9b872e7d2838ee10a5b7",
+    "salt": "d4c6f5c76ad0ac0091ca69a92e4477aa",
+    "totpSecret": "PFKS6XLYEZSWAL3B",
+    "joinedAt": "2026-06-19T16:49:49.960Z"
+  }
+}
