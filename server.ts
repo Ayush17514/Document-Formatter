@@ -20,8 +20,8 @@ const __dirname = path.dirname(__filename);
 
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+const supabaseUrl = process.env.SUPABASE_URL || "https://YOUR_SUPABASE_PROJECT.supabase.co";
+const supabaseKey = process.env.SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Lazy-loaded Gemini AI client
@@ -40,7 +40,7 @@ function getGenAI() {
 const upload = multer({ dest: "uploads/" });
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -529,7 +529,7 @@ app.post("/api/latex", async (req, res) => {
         const { classified, publication } = req.body;
         if (!Array.isArray(classified)) throw new Error("Invalid classified payload");
         const genAI = getGenAI();
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const prompt = `Convert this manuscript structure into a professional LaTeX document compatible with ${publication}. \nReturn ONLY the raw .tex code. Content segments: ${JSON.stringify(classified.map((c: any) => ({ type: c.label, text: c.text })))} `;
         
         let text = await generateWithTimeout(model, prompt, 20000).catch((e) => { throw e; });
@@ -603,7 +603,7 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     
     try {
         const genAI = getGenAI();
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         
         const prompt = `Analyze this manuscript text and classify each segment into one of these labels: \nTITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.\n\nRULES:\n- Return ONLY a JSON array of objects: { \"text\": \"...\", \"label\": \"...\" }.\n- Combine very short related lines if necessary.\n- Identify math equations even if they look like text.\n- Identify table headers and data.\n- Identify figure captions as FIGURE.\n\nManuscript segments:\n${JSON.stringify(paragraphs.slice(0, 80))} // Process first 80 segments to keep tokens manageable`;
 
@@ -692,7 +692,7 @@ app.post("/api/process", async (req, res) => {
             const refBlocks = classified.filter((b: any) => b.label === "REFERENCES");
             if (refBlocks.length > 0) {
                 const genAI = getGenAI();
-                const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
                 const prompt = `Reformat these academic references strictly into the ${publication} style. \nKeep exactly the same number of items. Return ONLY a JSON array of strings.\nInput: ${JSON.stringify(refBlocks.map((b: any) => b.text))}`;
                 
                 let text = await generateWithTimeout(model, prompt, 20000);
@@ -722,7 +722,7 @@ app.post("/api/process", async (req, res) => {
       rules = PUBLICATION_RULES[doc_type][publication];
     } else {
       try {
-        const model = getGenAI().getGenerativeModel({ model: "gemini-pro" });
+        const model = getGenAI().getGenerativeModel({ model: "gemini-1.5-flash" });
         const prompt = `Return ONLY JSON for manuscript formatting rules (publication: ${publication}, type: ${doc_type}). \n  Required: font_family, font_size_body, font_size_heading, columns, line_spacing, margins (t,b,l,r), alignment (JUSTIFIED/LEFT).`;
         let text = await generateWithTimeout(model, prompt, 15000);
         rules = JSON.parse(text.replace(/```json|```/g, "").trim());
