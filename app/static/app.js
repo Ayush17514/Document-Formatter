@@ -149,6 +149,28 @@
         getAll() {
             try { return JSON.parse(localStorage.getItem(this.STORAGE_KEY)) || []; } catch { return []; }
         },
+        
+        async fetchFromServer() {
+            const user = Auth.getUser();
+            if (!user) return [];
+            try {
+                const res = await fetch(`/api/history?email=${encodeURIComponent(user.email)}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    const mapped = data.map(d => ({
+                        id: d.id,
+                        fileName: d.filename,
+                        timestamp: d.created_at,
+                        status: d.status,
+                        venue: d.publication_venue,
+                        docType: d.document_type
+                    }));
+                    localStorage.setItem(this.STORAGE_KEY, JSON.stringify(mapped));
+                    return mapped;
+                }
+            } catch(e) { console.error('Error fetching history:', e); }
+            return this.getAll();
+        },
 
         save(session) {
             const all = this.getAll();
@@ -837,16 +859,31 @@
     }
 
     function initHistoryLogic() {
-        const clearBtn = $('clear-history-btn');
-        if (clearBtn) {
-            clearBtn.onclick = () => {
-                if (confirm('Clear all formatting history?')) {
-                    History.clear();
-                    Router.renderPage('history');
-                    showToast('History cleared', 'success');
+        const attachClearBtn = () => {
+            const clearBtn = $('clear-history-btn');
+            if (clearBtn) {
+                clearBtn.onclick = () => {
+                    if (confirm('Clear all formatting history?')) {
+                        History.clear();
+                        Router.renderPage('history');
+                        showToast('History cleared', 'success');
+                    }
+                };
+            }
+        };
+
+        attachClearBtn();
+
+        History.fetchFromServer().then(() => {
+            if (Router.currentRoute === 'history') {
+                const content = $('page-content');
+                if (content) {
+                    content.innerHTML = renderHistoryPage();
+                    lucide.createIcons();
+                    attachClearBtn();
                 }
-            };
-        }
+            }
+        });
     }
 
     // ================================================================
@@ -1217,7 +1254,7 @@
                 const r = await fetch('/api/process', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ file_id: currentFileId, doc_type: type, publication: pub, classified: currentClassifiedData, fix_references: fixRefs, preview_only: true })
+                    body: JSON.stringify({ file_id: currentFileId, doc_type: type, publication: pub, classified: currentClassifiedData, fix_references: fixRefs, preview_only: true, email: Auth.getUser()?.email })
                 });
                 const data = await r.json();
                 if (!r.ok) throw new Error(data.detail || "Formatting failed");
@@ -1313,7 +1350,8 @@
                             publication: pubSelect.value,
                             classified: currentClassifiedData,
                             fix_references: fixRefs,
-                            preview_only: false
+                            preview_only: false,
+                            email: Auth.getUser()?.email
                         })
                     });
                     window.location = `/api/download/${currentFileId}`;

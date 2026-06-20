@@ -18,6 +18,12 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import { createClient } from "@supabase/supabase-js";
+
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
+
 // Lazy-loaded Gemini AI client
 let genAIInstance: GoogleGenerativeAI | null = null;
 function getGenAI() {
@@ -254,67 +260,56 @@ const DEFAULT_RULES = {
 };
 // --- User Database & Auth State ---
 
-const USERS_FILE = path.join(__dirname, "users.json");
-
 interface UserRecord {
+  id?: string;
   name: string;
   email: string;
-  passwordHash: string;
+  password_hash: string;
   salt: string;
-  totpSecret: string;
-  joinedAt: string;
+  totp_secret: string;
+  created_at?: string;
 }
 
 class UserDb {
-  private static loadUsers(): Record<string, UserRecord> {
-    try {
-      if (!fs.existsSync(USERS_FILE)) {
-        fs.writeFileSync(USERS_FILE, JSON.stringify({}), "utf8");
-      }
-      const data = fs.readFileSync(USERS_FILE, "utf8");
-      return JSON.parse(data);
-    } catch (e) {
-      console.error("Error loading users database", e);
-      return {};
-    }
+  public static async getUser(email: string): Promise<UserRecord | null> {
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email.toLowerCase().trim())
+      .single();
+    
+    if (error || !data) return null;
+    return data;
   }
 
-  private static saveUsers(users: Record<string, UserRecord>) {
-    try {
-      fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf8");
-    } catch (e) {
-      console.error("Error saving users database", e);
-    }
-  }
-
-  public static getUser(email: string): UserRecord | null {
-    const users = this.loadUsers();
-    return users[email.toLowerCase().trim()] || null;
-  }
-
-  public static createUser(name: string, email: string, passwordHash: string, salt: string, totpSecret: string): UserRecord {
-    const users = this.loadUsers();
+  public static async createUser(name: string, email: string, passwordHash: string, salt: string, totpSecret: string): Promise<UserRecord | null> {
     const cleanEmail = email.toLowerCase().trim();
-    const newUser: UserRecord = {
+    const newUser = {
       name,
       email: cleanEmail,
-      passwordHash,
+      password_hash: passwordHash,
       salt,
-      totpSecret,
-      joinedAt: new Date().toISOString()
+      totp_secret: totpSecret,
     };
-    users[cleanEmail] = newUser;
-    this.saveUsers(users);
-    return newUser;
+    const { data, error } = await supabase
+      .from('users')
+      .insert([newUser])
+      .select()
+      .single();
+    
+    if (error) {
+      console.error("Error creating user:", error);
+      return null;
+    }
+    return data;
   }
 
-  public static updateUser(email: string, updates: Partial<UserRecord>) {
-    const users = this.loadUsers();
+  public static async updateUser(email: string, updates: Partial<UserRecord>): Promise<void> {
     const cleanEmail = email.toLowerCase().trim();
-    if (users[cleanEmail]) {
-      users[cleanEmail] = { ...users[cleanEmail], ...updates };
-      this.saveUsers(users);
-    }
+    await supabase
+      .from('users')
+      .update(updates)
+      .eq('email', cleanEmail);
   }
 
   public static hashPassword(password: string, salt: string): string {
@@ -345,7 +340,7 @@ app.post("/api/auth/signup/init", async (req, res) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
-    if (UserDb.getUser(cleanEmail)) {
+    if (await UserDb.getUser(cleanEmail)) {
       return res.status(400).json({ detail: "Email already registered" });
     }
 
@@ -401,13 +396,16 @@ app.post("/api/auth/signup/verify", async (req, res) => {
     }
 
     // Save user to JSON database
-    const user = UserDb.createUser(
+    const user = await UserDb.createUser(
       pending.name,
       pending.email,
       pending.passwordHash,
       pending.salt,
       pending.totpSecret
     );
+    if (!user) {
+        return res.status(500).json({ detail: "Failed to create user in database." });
+    }
 
     // Cleanup pending signup
     pendingSignups.delete(cleanEmail);
@@ -420,7 +418,7 @@ app.post("/api/auth/signup/verify", async (req, res) => {
       user: {
         name: user.name,
         email: user.email,
-        joinedAt: user.joinedAt
+        joinedAt: user.created_at
       }
     });
   } catch (error: any) {
@@ -437,13 +435,13 @@ app.post("/api/auth/login/init", async (req, res) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
-    const user = UserDb.getUser(cleanEmail);
+    const user = await UserDb.getUser(cleanEmail);
     if (!user) {
       return res.status(400).json({ detail: "Invalid email or password" });
     }
 
     const hash = UserDb.hashPassword(password, user.salt);
-    if (hash !== user.passwordHash) {
+    if (hash !== user.password_hash) {
       return res.status(400).json({ detail: "Invalid email or password" });
     }
 
@@ -465,13 +463,13 @@ app.post("/api/auth/login/verify", async (req, res) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
-    const user = UserDb.getUser(cleanEmail);
+    const user = await UserDb.getUser(cleanEmail);
     if (!user) {
       return res.status(400).json({ detail: "Authentication session not found" });
     }
 
     // Verify TOTP token
-    const isValid = authenticator.verify({ token: code, secret: user.totpSecret });
+    const isValid = authenticator.verify({ token: code, secret: user.totp_secret });
     if (!isValid) {
       return res.status(400).json({ detail: "Invalid MFA code. Please check Microsoft Authenticator." });
     }
@@ -484,7 +482,7 @@ app.post("/api/auth/login/verify", async (req, res) => {
       user: {
         name: user.name,
         email: user.email,
-        joinedAt: user.joinedAt
+        joinedAt: user.created_at
       }
     });
   } catch (error: any) {
@@ -500,17 +498,17 @@ app.post("/api/auth/profile/update", async (req, res) => {
       return res.status(400).json({ detail: "Missing required fields" });
     }
     const cleanEmail = email.toLowerCase().trim();
-    const user = UserDb.getUser(cleanEmail);
+    const user = await UserDb.getUser(cleanEmail);
     if (!user) {
       return res.status(404).json({ detail: "User not found" });
     }
-    UserDb.updateUser(cleanEmail, { name });
+    await UserDb.updateUser(cleanEmail, { name });
     res.json({
       success: true,
       user: {
         name: name,
         email: user.email,
-        joinedAt: user.joinedAt
+        joinedAt: user.created_at
       }
     });
   } catch (error: any) {
@@ -838,11 +836,8 @@ app.post("/api/process", async (req, res) => {
     });
 
     const buffer = await Packer.toBuffer(doc);
-    if (!preview_only) {
-        const outputFilename = `formatted_${file_id}.docx`;
-        const outputPath = path.join(OUTPUT_DIR, outputFilename);
-        fs.writeFileSync(outputPath, buffer);
-    }
+    let downloadUrl = `/api/download/${file_id}`;
+    let publicDocxUrl = null;
 
     // Step 3: Visual Preview Generation
     const htmlResult = await mammoth.convertToHtml(
@@ -857,6 +852,43 @@ app.post("/api/process", async (req, res) => {
         }
     );
 
+    if (!preview_only) {
+        const outputFilename = `formatted_${file_id}.docx`;
+        const outputPath = path.join(OUTPUT_DIR, outputFilename);
+        fs.writeFileSync(outputPath, buffer); // Keep local copy for immediate download if needed
+        
+        // Upload to Supabase Storage
+        const { data: storageData, error: storageError } = await supabase.storage
+          .from('outputs')
+          .upload(outputFilename, buffer, {
+            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            upsert: true
+          });
+          
+        if (!storageError && storageData) {
+          const { data: publicUrlData } = supabase.storage.from('outputs').getPublicUrl(storageData.path);
+          publicDocxUrl = publicUrlData.publicUrl;
+        }
+
+        // Save to Database if user email is provided
+        const { email } = req.body;
+        if (email) {
+           const cleanEmail = email.toLowerCase().trim();
+           const user = await UserDb.getUser(cleanEmail);
+           if (user && user.id) {
+               await supabase.from('documents').insert([{
+                   user_id: user.id,
+                   filename: outputFilename,
+                   publication_venue: publication,
+                   document_type: doc_type,
+                   status: 'completed',
+                   docx_url: publicDocxUrl,
+                   html_url: null // We could store HTML if needed
+               }]);
+           }
+        }
+    }
+
     // Clean older outputs asynchronously
     setImmediate(() => purgeOldOutputs(7));
 
@@ -864,7 +896,7 @@ app.post("/api/process", async (req, res) => {
         status: "success",
         preview_html: htmlResult.value,
         rules,
-        download_url: `/api/download/${file_id}`
+        download_url: publicDocxUrl || downloadUrl
     });
   } catch (error: any) {
     console.error("Processing Error:", error);
@@ -877,6 +909,27 @@ app.get("/api/download/:file_id", (req, res) => {
     const outputPath = path.join(OUTPUT_DIR, `formatted_${fileId}.docx`);
     if (!fs.existsSync(outputPath)) return res.status(404).send("File not found");
     res.download(outputPath);
+});
+
+app.get("/api/history", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ detail: "Email required" });
+    const cleanEmail = (email as string).toLowerCase().trim();
+    const user = await UserDb.getUser(cleanEmail);
+    if (!user || !user.id) return res.status(404).json({ detail: "User not found" });
+
+    const { data, error } = await supabase
+      .from('documents')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ detail: err.message });
+  }
 });
 
 app.listen(PORT, "0.0.0.0", () => {
