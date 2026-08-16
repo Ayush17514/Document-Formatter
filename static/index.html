@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ManuscriptAI | Professional Academic Formatter</title>
     <meta name="description" content="AI-powered manuscript formatting for top-tier academic venues. Format your papers for IEEE, Nature, Cell, ACM, and more.">
-    <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Inter:wght@100;200;300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- Local compiled Tailwind CSS (generated during build) -->
+    <link rel="stylesheet" href="/static/tailwind.css">
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://unpkg.com/lucide@latest"></script>
     <!-- Quill.js for WYSIWYG Editor -->
@@ -130,71 +131,3 @@
         <!-- ===== FOOTER ===== -->
         <footer class="site-footer mt-auto">
             <div class="footer-glow"></div>
-            <div class="max-w-7xl mx-auto px-6 py-16">
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-12 mb-12">
-                    <!-- Brand Column -->
-                    <div>
-                        <div class="flex items-center gap-3 mb-5">
-                            <div class="w-10 h-10 bg-gradient-to-br from-indigo-500 to-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/10">
-                                <i data-lucide="scroll-text" class="text-white w-5 h-5"></i>
-                            </div>
-                            <span class="font-black text-lg tracking-tighter uppercase italic">Manuscript<span class="text-indigo-500">AI</span></span>
-                        </div>
-                        <p class="text-slate-500 text-sm leading-relaxed max-w-xs">AI-powered manuscript formatting for top-tier academic venues. Transform your research into publication-ready documents with neural precision.</p>
-                    </div>
-                    <!-- Quick Links Column -->
-                    <div>
-                        <h4 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-5">Quick Links</h4>
-                        <div class="space-y-3">
-                            <a href="#/home" class="footer-link"><i data-lucide="zap" class="w-3.5 h-3.5"></i> Format Document</a>
-                            <a href="#/about" class="footer-link"><i data-lucide="sparkles" class="w-3.5 h-3.5"></i> About Project</a>
-                            <a href="#/history" class="footer-link"><i data-lucide="archive" class="w-3.5 h-3.5"></i> View History</a>
-                            <a href="#/profile" class="footer-link"><i data-lucide="settings" class="w-3.5 h-3.5"></i> My Profile</a>
-                        </div>
-                    </div>
-                    <!-- Venues Column -->
-                    <div>
-                        <h4 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-5">Supported Venues</h4>
-                        <div class="flex flex-wrap gap-2">
-                            <span class="venue-tag">IEEE</span>
-                            <span class="venue-tag">Nature</span>
-                            <span class="venue-tag">Cell Press</span>
-                            <span class="venue-tag">ACM</span>
-                            <span class="venue-tag">Elsevier</span>
-                            <span class="venue-tag">Springer</span>
-                            <span class="venue-tag">NeurIPS</span>
-                            <span class="venue-tag">MDPI</span>
-                            <span class="venue-tag">Wiley</span>
-                        </div>
-                    </div>
-                </div>
-                <!-- Bottom Bar -->
-                <div class="border-t border-white/[0.04] pt-8 flex flex-col sm:flex-row justify-between items-center gap-4">
-                    <p class="text-xs text-slate-600">&copy; 2025 ManuscriptAI &mdash; Hackathon Round 2 Build</p>
-                    <div class="flex items-center gap-3">
-                        <span class="px-2.5 py-1 bg-white/[0.03] rounded-lg text-[10px] text-slate-500 font-mono border border-white/[0.05]">v3.2.0</span>
-                        <span class="flex items-center gap-1.5 text-[10px] text-slate-600">
-                            <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-                            All Systems Operational
-                        </span>
-                    </div>
-                </div>
-            </div>
-        </footer>
-    </div>
-
-    <!-- ===== LOADING OVERLAY ===== -->
-    <div id="global-loader" class="fixed inset-0 bg-black/60 backdrop-blur-xl z-[100] flex flex-col items-center justify-center hidden">
-        <div class="relative w-24 h-24 mb-10">
-            <div class="absolute inset-0 border-4 border-indigo-500/20 rounded-full"></div>
-            <div class="absolute inset-0 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-            <div class="absolute inset-4 bg-indigo-500/10 rounded-full blur-sm animate-pulse"></div>
-        </div>
-        <div class="text-2xl font-black italic tracking-tighter uppercase text-white animate-pulse" id="loader-text">Processing...</div>
-        <p class="text-slate-500 text-xs mt-4 uppercase tracking-[0.4em] font-bold">Neural Engine v3.2</p>
-    </div>
-
-    <script src="/static/app.js"></script>
-    <div id="toast-container" class="fixed bottom-6 right-6 z-[200] w-80 space-y-3 pointer-events-none"></div>
-</body>
-</html>
