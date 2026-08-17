@@ -4,12 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-  "dev": "tsx server.ts",
-  "build:css": "tailwindcss -i ./src/styles/tailwind.css -o ./app/static/tailwind.css --minify",
-  "build": "npm run build:css",
-  "start": "tsx server.ts",
-  "lint": "tsc --noEmit"
-}
+    "dev": "tsx server.ts",
+    "build:css": "tailwindcss -i ./src/styles/tailwind.css -o ./app/static/tailwind.css --minify",
+    "dev:css": "tailwindcss -i ./src/styles/tailwind.css -o ./app/static/tailwind.css --watch",
+    "build": "npm run build:css",
+    "start": "tsx server.ts",
+    "lint": "tsc --noEmit"
+  },
   "dependencies": {
     "@google/genai": "^1.29.0",
     "@google/generative-ai": "^0.21.0",
