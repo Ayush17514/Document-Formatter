@@ -2,5 +2,7 @@
   "name": "Manuscript Formatter AI",
   "description": "Professional document formatting platform using AI to structure and style manuscripts according to publication-specific rules. Features Gemini-powered dynamic rule discovery, live HTML previews, and production-grade export options.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

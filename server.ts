@@ -9,48 +9,61 @@ import express from "express";
 import crypto from "crypto";
 import { authenticator } from "otplib";
 import QRCode from "qrcode";
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, convertInchesToTwip } from "docx";
-import { spawnSync } from 'child_process';
+import { GoogleGenAI } from "@google/genai";
+import { Document, Packer, Paragraph, TextRun, AlignmentType, convertInchesToTwip } from "docx";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { createClient } from "@supabase/supabase-js";
+// Supabase client initialization (resilient with fallback)
+const rawSupabaseUrl = process.env.SUPABASE_URL;
+const rawSupabaseKey = process.env.SUPABASE_ANON_KEY;
+const isSupabaseConfigured = Boolean(
+  rawSupabaseUrl &&
+  rawSupabaseKey &&
+  !rawSupabaseUrl.includes("YOUR_SUPABASE_PROJECT") &&
+  !rawSupabaseKey.includes("YOUR_SUPABASE_ANON_KEY")
+);
 
-const supabaseUrl = process.env.SUPABASE_URL || "https://YOUR_SUPABASE_PROJECT.supabase.co";
-const supabaseKey = process.env.SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = isSupabaseConfigured
+  ? createClient(rawSupabaseUrl!, rawSupabaseKey!)
+  : null;
 
-// Lazy-loaded Gemini AI client
-let genAIInstance: GoogleGenerativeAI | null = null;
-function getGenAI() {
+// Lazy-loaded Gemini AI client using @google/genai
+let genAIInstance: GoogleGenAI | null = null;
+function getGenAI(): GoogleGenAI {
   if (!genAIInstance) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey === "AI_STUDIO_FALLBACK" || apiKey.trim() === "") {
       throw new Error("API_KEY_MISSING");
     }
-    genAIInstance = new GoogleGenerativeAI(apiKey);
+    genAIInstance = new GoogleGenAI({ apiKey });
   }
   return genAIInstance;
 }
 
-const upload = multer({ dest: "uploads/" });
-
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(cors());
-app.use(express.json());
-app.use("/static", express.static(path.join(__dirname, "app/static")));
+// Directories
+const STATIC_DIR = fs.existsSync(path.join(process.cwd(), "app/static"))
+  ? path.join(process.cwd(), "app/static")
+  : path.join(__dirname, "app/static");
+const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+const OUTPUT_DIR = path.join(process.cwd(), "outputs");
+const USERS_FILE = path.join(process.cwd(), "users.json");
 
-// Ensure essential directories
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-const OUTPUT_DIR = path.join(__dirname, "outputs");
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+const upload = multer({ dest: UPLOAD_DIR });
+
+app.use(cors());
+app.use(express.json({ limit: "50mb" }));
+app.use("/static", express.static(STATIC_DIR));
 
 // Purge outputs older than N days to avoid disk buildup
 function purgeOldOutputs(days = 7) {
@@ -62,30 +75,29 @@ function purgeOldOutputs(days = 7) {
         const p = path.join(OUTPUT_DIR, f);
         const stat = fs.statSync(p);
         if (stat.mtimeMs < cutoff) fs.unlinkSync(p);
-      } catch (e) { /* ignore per-file errors */ }
+      } catch (e) { /* ignore */ }
     });
   } catch (e) { console.warn("Failed to purge old outputs:", e); }
 }
 
 // Helper: promise timeout wrapper
-function withTimeout<T>(promise: Promise<T>, ms = 15000): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms = 20000): Promise<T> {
   const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('AI_TIMEOUT')), ms));
   return Promise.race([promise, timeout]);
 }
 
-// Helper: safely call model.generateContent with timeout and return text
-async function generateWithTimeout(model: any, prompt: string, ms = 15000) {
-  const response = await withTimeout(model.generateContent(prompt), ms);
-  // model.generateContent returns an object with response.text() or response.text
-  if (typeof response?.response?.text === 'function') return response.response.text();
-  if (typeof response?.response?.text === 'string') return response.response.text;
-  if (typeof response?.text === 'function') return response.text();
-  if (typeof response?.text === 'string') return response.text;
-  return JSON.stringify(response);
+// Helper: safely call Gemini generateContent with timeout and return text
+async function generateWithTimeout(prompt: string, ms = 20000): Promise<string> {
+  const ai = getGenAI();
+  const generatePromise = ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: prompt,
+  }).then(res => res.text || "");
+  return withTimeout(generatePromise, ms);
 }
 
 // Helper: convert HTML to simple paragraph strings
-function htmlToParagraphs(html: string) {
+function htmlToParagraphs(html: string): string[] {
   if (!html) return [];
   let t = html.replace(/<\/?p[^>]*>/gi, '\n');
   t = t.replace(/<[^>]+>/g, '');
@@ -258,6 +270,7 @@ const DEFAULT_RULES = {
   margins: { top: 1.0, bottom: 1.0, left: 1.0, right: 1.0 },
   alignment: "JUSTIFIED"
 };
+
 // --- User Database & Auth State ---
 
 interface UserRecord {
@@ -270,46 +283,138 @@ interface UserRecord {
   created_at?: string;
 }
 
+const localUsers = new Map<string, UserRecord>();
+
+// Seed local users from users.json if exists
+function loadLocalUsers() {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const raw = fs.readFileSync(USERS_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      for (const [key, val] of Object.entries(parsed as any)) {
+        const u = val as any;
+        const cleanEmail = (u.email || key).toLowerCase().trim();
+        localUsers.set(cleanEmail, {
+          id: u.id || `user_${crypto.randomBytes(8).toString("hex")}`,
+          name: u.name || "User",
+          email: cleanEmail,
+          password_hash: u.password_hash || u.passwordHash || "",
+          salt: u.salt || "",
+          totp_secret: u.totp_secret || u.totpSecret || "",
+          created_at: u.created_at || u.joinedAt || new Date().toISOString(),
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to load local users.json:", e);
+  }
+}
+loadLocalUsers();
+
+function saveLocalUsers() {
+  try {
+    const obj: Record<string, any> = {};
+    for (const [email, user] of localUsers.entries()) {
+      obj[email] = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        passwordHash: user.password_hash,
+        salt: user.salt,
+        totpSecret: user.totp_secret,
+        joinedAt: user.created_at,
+      };
+    }
+    fs.writeFileSync(USERS_FILE, JSON.stringify(obj, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("Failed to save users.json:", e);
+  }
+}
+
 class UserDb {
   public static async getUser(email: string): Promise<UserRecord | null> {
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email.toLowerCase().trim())
-      .single();
-    
-    if (error || !data) return null;
-    return data;
+    const cleanEmail = email.toLowerCase().trim();
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('email', cleanEmail)
+          .single();
+        if (!error && data) {
+          return {
+            id: data.id,
+            name: data.name,
+            email: data.email,
+            password_hash: data.password_hash || data.passwordHash,
+            salt: data.salt,
+            totp_secret: data.totp_secret || data.totpSecret,
+            created_at: data.created_at || data.joinedAt,
+          };
+        }
+      } catch (e) {
+        // Fallback to local
+      }
+    }
+    return localUsers.get(cleanEmail) || null;
   }
 
   public static async createUser(name: string, email: string, passwordHash: string, salt: string, totpSecret: string): Promise<UserRecord | null> {
     const cleanEmail = email.toLowerCase().trim();
-    const newUser = {
+    const newUser: UserRecord = {
+      id: `user_${crypto.randomBytes(8).toString("hex")}`,
       name,
       email: cleanEmail,
       password_hash: passwordHash,
       salt,
       totp_secret: totpSecret,
+      created_at: new Date().toISOString(),
     };
-    const { data, error } = await supabase
-      .from('users')
-      .insert([newUser])
-      .select()
-      .single();
-    
-    if (error) {
-      console.error("Error creating user:", error);
-      return null;
+
+    localUsers.set(cleanEmail, newUser);
+    saveLocalUsers();
+
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .insert([{
+            name: newUser.name,
+            email: newUser.email,
+            password_hash: newUser.password_hash,
+            salt: newUser.salt,
+            totp_secret: newUser.totp_secret,
+          }])
+          .select()
+          .single();
+        if (!error && data) {
+          newUser.id = data.id || newUser.id;
+        }
+      } catch (e) {
+        // Local user created successfully
+      }
     }
-    return data;
+    return newUser;
   }
 
   public static async updateUser(email: string, updates: Partial<UserRecord>): Promise<void> {
     const cleanEmail = email.toLowerCase().trim();
-    await supabase
-      .from('users')
-      .update(updates)
-      .eq('email', cleanEmail);
+    const existing = localUsers.get(cleanEmail);
+    if (existing) {
+      Object.assign(existing, updates);
+      localUsers.set(cleanEmail, existing);
+      saveLocalUsers();
+    }
+    if (supabase) {
+      try {
+        await supabase
+          .from('users')
+          .update(updates)
+          .eq('email', cleanEmail);
+      } catch (e) {
+        // Fallback
+      }
+    }
   }
 
   public static hashPassword(password: string, salt: string): string {
@@ -321,6 +426,21 @@ class UserDb {
   }
 }
 
+// In-memory documents history store with Supabase sync
+interface DocumentItem {
+  id: string;
+  user_id: string;
+  user_email: string;
+  filename: string;
+  publication_venue: string;
+  document_type: string;
+  status: string;
+  docx_url: string | null;
+  created_at: string;
+}
+
+const localDocuments: DocumentItem[] = [];
+
 const pendingSignups = new Map<string, {
   name: string;
   email: string;
@@ -330,7 +450,7 @@ const pendingSignups = new Map<string, {
   expiresAt: number;
 }>();
 
-// --- Routes ---
+// --- Auth Routes ---
 
 app.post("/api/auth/signup/init", async (req, res) => {
   try {
@@ -395,7 +515,7 @@ app.post("/api/auth/signup/verify", async (req, res) => {
       return res.status(400).json({ detail: "Invalid verification code. Please check Microsoft Authenticator." });
     }
 
-    // Save user to JSON database
+    // Save user
     const user = await UserDb.createUser(
       pending.name,
       pending.email,
@@ -404,7 +524,7 @@ app.post("/api/auth/signup/verify", async (req, res) => {
       pending.totpSecret
     );
     if (!user) {
-        return res.status(500).json({ detail: "Failed to create user in database." });
+      return res.status(500).json({ detail: "Failed to create user in database." });
     }
 
     // Cleanup pending signup
@@ -516,35 +636,31 @@ app.post("/api/auth/profile/update", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "app/static/index.html"));
-});
+// --- Document & AI Formatting Routes ---
 
 app.get("/api/options", (req, res) => {
   res.json(PUBLICATION_RULES);
 });
 
 app.post("/api/latex", async (req, res) => {
-    try {
-        const { classified, publication } = req.body;
-        if (!Array.isArray(classified)) throw new Error("Invalid classified payload");
-        const genAI = getGenAI();
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const prompt = `Convert this manuscript structure into a professional LaTeX document compatible with ${publication}. \nReturn ONLY the raw .tex code. Content segments: ${JSON.stringify(classified.map((c: any) => ({ type: c.label, text: c.text })))} `;
-        
-        let text = await generateWithTimeout(model, prompt, 20000).catch((e) => { throw e; });
-        // strip fences
-        text = text.replace(/```latex|```/g, "").trim();
-        res.json({ latex: text });
-    } catch (e: any) {
-        const errorMsg = e?.message || "";
-        if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID") || errorMsg === 'AI_TIMEOUT') {
-            res.status(400).json({ error: "A valid Gemini API key is required for LaTeX generation or the request timed out. Please check your secrets." });
-        } else {
-            console.error('LaTeX generation error:', e);
-            res.status(500).json({ error: "LaTeX Generation Failed" });
-        }
+  try {
+    const { classified, publication } = req.body;
+    if (!Array.isArray(classified)) throw new Error("Invalid classified payload");
+    const prompt = `Convert this manuscript structure into a professional LaTeX document compatible with ${publication}. \nReturn ONLY the raw .tex code. Content segments: ${JSON.stringify(classified.map((c: any) => ({ type: c.label, text: c.text })))} `;
+    
+    let text = await generateWithTimeout(prompt, 20000);
+    // strip fences
+    text = text.replace(/```latex|```/g, "").trim();
+    res.json({ latex: text });
+  } catch (e: any) {
+    const errorMsg = e?.message || "";
+    if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID") || errorMsg === 'AI_TIMEOUT') {
+      res.status(400).json({ error: "A valid Gemini API key is required for LaTeX generation or the request timed out. Please check your secrets." });
+    } else {
+      console.error('LaTeX generation error:', e);
+      res.status(500).json({ error: "LaTeX Generation Failed" });
     }
+  }
 });
 
 app.post("/api/upload", upload.single("file"), async (req: any, res) => {
@@ -554,127 +670,99 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     if (!file) throw new Error("No file uploaded");
     filePath = file.path;
     
-    // Parse using mammoth to obtain HTML which preserves some structure (tables)
-    const htmlResult = await mammoth.convertToHtml({ path: file.path });
-    const html = htmlResult.value;
-    
     // Split into chunks based on paragraphs and structural elements
-    // We use a simplified split for the AI to process
-    const rawTextResult = await mammoth.extractRawText({ path: file.path });
+    const rawTextResult = await mammoth.extractRawText({ path: file.path }).catch(() => ({ value: "" }));
     const fullText = rawTextResult.value || "";
-    const paragraphs = fullText.split("\n").filter(t => t.trim() !== "");
+    const paragraphs = fullText.split("\n").map(t => t.trim()).filter(Boolean);
 
     // If mammoth path-based rawText is empty, try buffer-based extraction
     if (!paragraphs || paragraphs.length === 0) {
       try {
         const buf = fs.readFileSync(file.path);
-        const rawBufferResult = await mammoth.extractRawText({ buffer: buf }).catch(()=>({ value: '' }));
+        const rawBufferResult = await mammoth.extractRawText({ buffer: buf }).catch(() => ({ value: '' }));
         const fullBufferText = rawBufferResult.value || '';
         if (fullBufferText && fullBufferText.trim()) {
-          paragraphs.push(...fullBufferText.split('\n').filter(t => t.trim() !== ''));
+          paragraphs.push(...fullBufferText.split('\n').map(t => t.trim()).filter(Boolean));
         }
       } catch (e) { /* ignore */ }
     }
 
     // If still empty, try HTML fallback
     if (!paragraphs || paragraphs.length === 0) {
-      const htmlFallback = (await mammoth.convertToHtml({ path: file.path })).value || '';
+      const htmlFallback = (await mammoth.convertToHtml({ path: file.path }).catch(() => ({ value: "" }))).value || '';
       const extracted = htmlToParagraphs(htmlFallback);
       if (extracted && extracted.length) paragraphs.push(...extracted);
-    }
-
-    // If still empty, attempt python-cli fallback using python parse_cli.py
-    if (!paragraphs || paragraphs.length === 0) {
-      try {
-        const py = spawnSync('python3', [path.join(__dirname, 'app/parse_cli.py'), file.path], { encoding: 'utf8' });
-        if (py.status === 0 && py.stdout) {
-          const parsed = JSON.parse(py.stdout);
-          if (Array.isArray(parsed) && parsed.length) {
-            paragraphs.push(...parsed);
-            console.log('Python parser recovered paragraphs:', parsed.length);
-          }
-        } else {
-          console.warn('Python parser failed', py.stderr || py.stdout);
-        }
-      } catch (e) { console.warn('Python fallback failed', e); }
     }
 
     let classified: any = [];
     
     try {
-        const genAI = getGenAI();
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        
-        const prompt = `Analyze this manuscript text and classify each segment into one of these labels: \nTITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.\n\nRULES:\n- Return ONLY a JSON array of objects: { \"text\": \"...\", \"label\": \"...\" }.\n- Combine very short related lines if necessary.\n- Identify math equations even if they look like text.\n- Identify table headers and data.\n- Identify figure captions as FIGURE.\n\nManuscript segments:\n${JSON.stringify(paragraphs.slice(0, 80))} // Process first 80 segments to keep tokens manageable`;
+      const prompt = `Analyze this manuscript text and classify each segment into one of these labels: \nTITLE, AUTHORS, ABSTRACT, HEADING1, HEADING2, BODY, REFERENCES, EQUATION, TABLE, FIGURE.\n\nRULES:\n- Return ONLY a JSON array of objects: { \"text\": \"...\", \"label\": \"...\" }.\n- Combine very short related lines if necessary.\n- Identify math equations even if they look like text.\n- Identify table headers and data.\n- Identify figure captions as FIGURE.\n\nManuscript segments:\n${JSON.stringify(paragraphs.slice(0, 80))}`;
 
-        let responseText = await generateWithTimeout(model, prompt, 20000);
-        responseText = responseText.replace(/```json|```/g, "").trim();
-        try {
-            const parsed = JSON.parse(responseText);
-            if (Array.isArray(parsed)) classified = parsed;
-            else throw new Error('AI returned non-array');
-        } catch (e) {
-            console.warn('AI returned invalid JSON classification, falling back to heuristics', e);
-            // Fall through to heuristics below
-            classified = [];
-        }
+      let responseText = await generateWithTimeout(prompt, 20000);
+      responseText = responseText.replace(/```json|```/g, "").trim();
+      try {
+        const parsed = JSON.parse(responseText);
+        if (Array.isArray(parsed)) classified = parsed;
+        else throw new Error('AI returned non-array');
+      } catch (e) {
+        console.warn('AI returned invalid JSON classification, falling back to heuristics', e);
+        classified = [];
+      }
     } catch (aiErr) {
-        console.warn("AI Classification failed or timed out, falling back to heuristics:", aiErr);
+      console.warn("AI Classification failed or timed out, falling back to heuristics:", aiErr);
     }
 
     // Heuristic Fallback if classified empty
     if (!Array.isArray(classified) || classified.length === 0) {
-        classified = paragraphs.map((t: string, i: number) => {
-          let label = "BODY";
-          const tLower = t.toLowerCase().trim();
-          const tClean = t.trim();
-          
-          if (i === 0 && tClean.length < 200) label = "TITLE";
-          else if (i < 5 && (tClean.includes("@") || tClean.includes(","))) label = "AUTHORS";
-          else if (tLower.startsWith("abstract") || (i < 10 && tLower.startsWith("abstract:"))) label = "ABSTRACT";
-          else if (tLower.startsWith("reference") || tLower.startsWith("bibliography")) label = "REFERENCES";
-          else if (tClean.length < 100 && (tClean.match(/^[I|V|X|\d]+\./) || tClean === tClean.toUpperCase())) label = "HEADING1";
-          
-          return { text: tClean, label };
-        });
+      classified = paragraphs.map((t: string, i: number) => {
+        let label = "BODY";
+        const tLower = t.toLowerCase().trim();
+        const tClean = t.trim();
+        
+        if (i === 0 && tClean.length < 200) label = "TITLE";
+        else if (i < 5 && (tClean.includes("@") || tClean.includes(","))) label = "AUTHORS";
+        else if (tLower.startsWith("abstract") || (i < 10 && tLower.startsWith("abstract:"))) label = "ABSTRACT";
+        else if (tLower.startsWith("reference") || tLower.startsWith("bibliography")) label = "REFERENCES";
+        else if (tClean.length < 100 && (tClean.match(/^[I|V|X|\d]+\./) || tClean === tClean.toUpperCase())) label = "HEADING1";
+        
+        return { text: tClean, label };
+      });
     }
 
     // Normalize elements: ensure each item has text & label fields
     classified = classified.map((item: any) => {
       if (typeof item === 'string') return { text: item, label: 'BODY' };
       if (item && item.text && item.label) return { text: String(item.text), label: String(item.label) };
-      // maybe old python classifier format
       if (item && item.data && item.data.text) return { text: String(item.data.text), label: item.label || 'BODY' };
       return { text: String(item?.text || ''), label: String(item?.label || 'BODY') };
     });
 
-    // If still empty, return error
     if (!Array.isArray(classified) || classified.length === 0) {
-        res.status(422).json({ detail: 'No paragraphs were extracted from the document' });
-        return;
+      res.status(422).json({ detail: 'No paragraphs were extracted from the document' });
+      return;
     }
 
     // Stats
     const label_distribution = classified.reduce((acc: any, p: any) => {
-        acc[p.label] = (acc[p.label] || 0) + 1;
-        return acc;
+      acc[p.label] = (acc[p.label] || 0) + 1;
+      return acc;
     }, {});
 
     // Clean older outputs asynchronously
     setImmediate(() => purgeOldOutputs(7));
 
     res.json({
-        file_id: file.filename,
-        validation_score: 95,
-        paragraphs: classified,
-        stats: { label_distribution },
-        classified
+      file_id: file.filename,
+      validation_score: 95,
+      paragraphs: classified,
+      stats: { label_distribution },
+      classified
     });
   } catch (error: any) {
     console.error('Upload processing error:', error);
     res.status(500).json({ detail: error.message });
   } finally {
-    // Always try to remove uploaded file to avoid disk buildup
     try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch (e) { console.warn('Failed to delete upload', e); }
   }
 });
@@ -686,34 +774,29 @@ app.post("/api/process", async (req, res) => {
     
     if (!Array.isArray(classified)) classified = [];
 
-    // Feature 5: AI Reference Correction
+    // AI Reference Correction
     if (fix_references && !preview_only && Array.isArray(classified)) {
-        try {
-            const refBlocks = classified.filter((b: any) => b.label === "REFERENCES");
-            if (refBlocks.length > 0) {
-                const genAI = getGenAI();
-                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-                const prompt = `Reformat these academic references strictly into the ${publication} style. \nKeep exactly the same number of items. Return ONLY a JSON array of strings.\nInput: ${JSON.stringify(refBlocks.map((b: any) => b.text))}`;
-                
-                let text = await generateWithTimeout(model, prompt, 20000);
-                text = text.replace(/```json|```/g, "").trim();
-                let corrected = [];
-                try { corrected = JSON.parse(text); } catch (e) { console.warn('Reference correction returned invalid JSON', e); }
-                
-                let j = 0;
-                classified = classified.map((b: any) => {
-                    if (b.label === "REFERENCES" && corrected[j]) return { ...b, text: corrected[j++] };
-                    return b;
-                });
-            }
-        } catch (e: any) {
-            const errorMsg = e?.message || "";
-            if (e.message === "API_KEY_MISSING" || errorMsg.includes("API key not valid") || errorMsg.includes("API_KEY_INVALID") || errorMsg === 'AI_TIMEOUT') {
-                console.warn("Skipping Reference Correction: Invalid or missing API key or timeout.");
-            } else {
-                console.error("Reference correction failed", e);
-            }
+      try {
+        const refBlocks = classified.filter((b: any) => b.label === "REFERENCES");
+        if (refBlocks.length > 0) {
+          const prompt = `Reformat these academic references strictly into the ${publication} style. \nKeep exactly the same number of items. Return ONLY a JSON array of strings.\nInput: ${JSON.stringify(refBlocks.map((b: any) => b.text))}`;
+          
+          let text = await generateWithTimeout(prompt, 20000);
+          text = text.replace(/```json|```/g, "").trim();
+          let corrected: any = [];
+          try { corrected = JSON.parse(text); } catch (e) { console.warn('Reference correction returned invalid JSON', e); }
+          
+          if (Array.isArray(corrected) && corrected.length > 0) {
+            let j = 0;
+            classified = classified.map((b: any) => {
+              if (b.label === "REFERENCES" && corrected[j]) return { ...b, text: corrected[j++] };
+              return b;
+            });
+          }
         }
+      } catch (e: any) {
+        console.warn("Reference correction skipped or failed:", e?.message || e);
+      }
     }
 
     // Step 1: Rule Resolution
@@ -722,9 +805,8 @@ app.post("/api/process", async (req, res) => {
       rules = PUBLICATION_RULES[doc_type][publication];
     } else {
       try {
-        const model = getGenAI().getGenerativeModel({ model: "gemini-1.5-flash" });
         const prompt = `Return ONLY JSON for manuscript formatting rules (publication: ${publication}, type: ${doc_type}). \n  Required: font_family, font_size_body, font_size_heading, columns, line_spacing, margins (t,b,l,r), alignment (JUSTIFIED/LEFT).`;
-        let text = await generateWithTimeout(model, prompt, 15000);
+        let text = await generateWithTimeout(prompt, 15000);
         rules = JSON.parse(text.replace(/```json|```/g, "").trim());
         if (!rules.alignment) rules.alignment = "JUSTIFIED";
       } catch (e) { console.warn('Dynamic rules resolution failed, using defaults', e); }
@@ -770,9 +852,9 @@ app.post("/api/process", async (req, res) => {
               right: convertInchesToTwip(rules.margins?.right || 1),
             }
           },
-            column: { count: rules.columns || 1, space: 708 }
-          },
-          children: (Array.isArray(classified) ? classified : []).map((p: any) => {
+          column: { count: rules.columns || 1, space: 708 }
+        },
+        children: (Array.isArray(classified) ? classified : []).map((p: any) => {
           let alignment: any = (rules.alignment === "JUSTIFIED") ? AlignmentType.JUSTIFIED : AlignmentType.LEFT;
           let fontSize = rules.font_size_body || 12;
           let bold = false;
@@ -823,11 +905,11 @@ app.post("/api/process", async (req, res) => {
             style: p.label,
             alignment: alignment,
             children: [new TextRun({ 
-                text, 
-                bold, 
-                italics: italic,
-                size: Math.max(1, Math.floor(fontSize)) * 2,
-                font: rules.font_family ? { name: rules.font_family } : undefined
+              text, 
+              bold, 
+              italics: italic,
+              size: Math.max(1, Math.floor(fontSize)) * 2,
+              font: rules.font_family ? { name: rules.font_family } : undefined
             })],
             spacing: { line: Math.round((rules.line_spacing || 1.15) * 240), after: 120 }
           });
@@ -841,62 +923,85 @@ app.post("/api/process", async (req, res) => {
 
     // Step 3: Visual Preview Generation
     const htmlResult = await mammoth.convertToHtml(
-        { buffer },
-        {
-            styleMap: [
-                "p[style-name='TITLE'] => p.ql-align-center:fresh",
-                "p[style-name='AUTHORS'] => p.ql-align-center:fresh",
-                "p[style-name='EQUATION'] => p.ql-align-center:fresh",
-                "p[style-name='FIGURE'] => p.ql-align-center:fresh"
-            ]
-        }
+      { buffer },
+      {
+        styleMap: [
+          "p[style-name='TITLE'] => p.ql-align-center:fresh",
+          "p[style-name='AUTHORS'] => p.ql-align-center:fresh",
+          "p[style-name='EQUATION'] => p.ql-align-center:fresh",
+          "p[style-name='FIGURE'] => p.ql-align-center:fresh"
+        ]
+      }
     );
 
     if (!preview_only) {
-        const outputFilename = `formatted_${file_id}.docx`;
-        const outputPath = path.join(OUTPUT_DIR, outputFilename);
-        fs.writeFileSync(outputPath, buffer); // Keep local copy for immediate download if needed
-        
-        // Upload to Supabase Storage
-        const { data: storageData, error: storageError } = await supabase.storage
-          .from('outputs')
-          .upload(outputFilename, buffer, {
-            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            upsert: true
-          });
-          
-        if (!storageError && storageData) {
-          const { data: publicUrlData } = supabase.storage.from('outputs').getPublicUrl(storageData.path);
-          publicDocxUrl = publicUrlData.publicUrl;
+      const outputFilename = `formatted_${file_id}.docx`;
+      const outputPath = path.join(OUTPUT_DIR, outputFilename);
+      fs.writeFileSync(outputPath, buffer);
+      
+      // Upload to Supabase Storage if configured
+      if (supabase) {
+        try {
+          const { data: storageData, error: storageError } = await supabase.storage
+            .from('outputs')
+            .upload(outputFilename, buffer, {
+              contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              upsert: true
+            });
+            
+          if (!storageError && storageData) {
+            const { data: publicUrlData } = supabase.storage.from('outputs').getPublicUrl(storageData.path);
+            publicDocxUrl = publicUrlData.publicUrl;
+          }
+        } catch (e) {
+          // Ignored
         }
+      }
 
-        // Save to Database if user email is provided
-        const { email } = req.body;
-        if (email) {
-           const cleanEmail = email.toLowerCase().trim();
-           const user = await UserDb.getUser(cleanEmail);
-           if (user && user.id) {
-               await supabase.from('documents').insert([{
-                   user_id: user.id,
-                   filename: outputFilename,
-                   publication_venue: publication,
-                   document_type: doc_type,
-                   status: 'completed',
-                   docx_url: publicDocxUrl,
-                   html_url: null // We could store HTML if needed
-               }]);
-           }
+      // Save to database/history if user email is provided
+      const { email } = req.body;
+      if (email) {
+        const cleanEmail = email.toLowerCase().trim();
+        const user = await UserDb.getUser(cleanEmail);
+        const recordId = `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        
+        localDocuments.unshift({
+          id: recordId,
+          user_id: user?.id || `user_${cleanEmail}`,
+          user_email: cleanEmail,
+          filename: outputFilename,
+          publication_venue: publication,
+          document_type: doc_type,
+          status: 'completed',
+          docx_url: publicDocxUrl || downloadUrl,
+          created_at: new Date().toISOString()
+        });
+
+        if (supabase && user && user.id) {
+          try {
+            await supabase.from('documents').insert([{
+              user_id: user.id,
+              filename: outputFilename,
+              publication_venue: publication,
+              document_type: doc_type,
+              status: 'completed',
+              docx_url: publicDocxUrl,
+              html_url: null
+            }]);
+          } catch (e) {
+            // Ignored
+          }
         }
+      }
     }
 
-    // Clean older outputs asynchronously
     setImmediate(() => purgeOldOutputs(7));
 
     res.json({
-        status: "success",
-        preview_html: htmlResult.value,
-        rules,
-        download_url: publicDocxUrl || downloadUrl
+      status: "success",
+      preview_html: htmlResult.value,
+      rules,
+      download_url: publicDocxUrl || downloadUrl
     });
   } catch (error: any) {
     console.error("Processing Error:", error);
@@ -905,10 +1010,10 @@ app.post("/api/process", async (req, res) => {
 });
 
 app.get("/api/download/:file_id", (req, res) => {
-    const fileId = req.params.file_id;
-    const outputPath = path.join(OUTPUT_DIR, `formatted_${fileId}.docx`);
-    if (!fs.existsSync(outputPath)) return res.status(404).send("File not found");
-    res.download(outputPath);
+  const fileId = req.params.file_id;
+  const outputPath = path.join(OUTPUT_DIR, `formatted_${fileId}.docx`);
+  if (!fs.existsSync(outputPath)) return res.status(404).send("File not found");
+  res.download(outputPath);
 });
 
 app.get("/api/history", async (req, res) => {
@@ -917,19 +1022,36 @@ app.get("/api/history", async (req, res) => {
     if (!email) return res.status(400).json({ detail: "Email required" });
     const cleanEmail = (email as string).toLowerCase().trim();
     const user = await UserDb.getUser(cleanEmail);
-    if (!user || !user.id) return res.status(404).json({ detail: "User not found" });
 
-    const { data, error } = await supabase
-      .from('documents')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
+    if (supabase && user && user.id) {
+      try {
+        const { data, error } = await supabase
+          .from('documents')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false });
 
-    if (error) throw error;
-    res.json(data);
+        if (!error && data && data.length > 0) {
+          return res.json(data);
+        }
+      } catch (e) {
+        // Fall through to local history
+      }
+    }
+
+    // Local in-memory history fallback
+    const userDocs = localDocuments.filter(d => 
+      d.user_email === cleanEmail || (user && user.id && d.user_id === user.id)
+    );
+    res.json(userDocs);
   } catch (err: any) {
     res.status(500).json({ detail: err.message });
   }
+});
+
+// Single-page fallback for frontend
+app.get("*", (req, res) => {
+  res.sendFile(path.join(STATIC_DIR, "index.html"));
 });
 
 app.listen(PORT, "0.0.0.0", () => {

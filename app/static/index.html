@@ -132,6 +132,25 @@
         <!-- ===== FOOTER ===== -->
         <footer class="site-footer mt-auto">
             <div class="footer-glow"></div>
+            <div class="max-w-7xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
+                <p>&copy; 2025 ManuscriptAI. Academic formatting engine.</p>
+                <div class="flex items-center gap-6">
+                    <span>IEEE &bull; Nature &bull; ACM &bull; Springer &bull; Cell</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Global Loader -->
+    <div id="global-loader" class="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] hidden flex flex-col items-center justify-center gap-4">
+        <div class="w-12 h-12 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
+        <p id="loader-text" class="text-sm font-medium text-slate-300">Processing Manuscript...</p>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="fixed bottom-6 right-6 z-[110] flex flex-col gap-3 pointer-events-none max-w-sm w-full"></div>
+
+    <script src="/static/app.js"></script>
     <script src="/static/compat-auth.js"></script>
 </body>
 </html>
